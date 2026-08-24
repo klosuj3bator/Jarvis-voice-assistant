@@ -1,0 +1,6 @@
+{
+  "_komentarz": "Mapowanie: nazwa, ktora wypowiesz -> sciezka do pliku .exe. Klucze zaczynajace sie od podkreslnika sa ignorowane (JSON nie ma komentarzy, wiec to nasz sposob na notatke). Nazwy pisz malymi literami. W sciezkach uzywaj podwojnych ukosnikow: C:\\\\Program Files\\\\...",
+  "_przyklad_jak_dopisac": "\"notatnik\": \"C:\\\\Windows\\\\System32\\\\notepad.exe\"",
+
+  "kalkulator": "C:\\Windows\\System32\\calc.exe"
+}

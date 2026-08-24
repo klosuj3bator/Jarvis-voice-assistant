@@ -6,6 +6,7 @@ Reszta Jarvisa (mowa, rozpoznawanie komend) będzie tylko wołać funkcje z tego
 """
 
 import os
+import time
 
 import spotipy
 from dotenv import load_dotenv
@@ -154,28 +155,84 @@ def odtworz(sp, uri, device_id=None):
         return False, f"Błąd Spotify: {e.msg}"
 
 
+# Ile łącznie sekund czekamy, aż świeżo otwarte Spotify zgłosi się do API.
+CZAS_OCZEKIWANIA_NA_SPOTIFY = 15
+
+# Co ile sekund odpytujemy API w trakcie czekania.
+ODSTEP_SPRAWDZANIA = 2
+
+
+def uruchom_i_poczekaj_na_spotify(sp):
+    """
+    Otwiera aplikację Spotify i czeka, aż pojawi się jako urządzenie w API.
+
+    "spotify:" to protokół URI zarejestrowany przez aplikację w systemie —
+    `start spotify:` mówi Windowsowi "otwórz to czymkolwiek, co obsługuje spotify:",
+    więc działa niezależnie od tego, gdzie aplikacja jest zainstalowana
+    (a Spotify z Microsoft Store nie ma normalnej ścieżki do .exe).
+
+    Zwraca: device_id gotowe do grania, albo None jeśli się nie doczekaliśmy.
+    """
+    print("Otwieram aplikację Spotify...")
+    os.system("start spotify:")
+
+    # Odpytujemy w pętli zamiast jednego długiego sleep(): jeśli Spotify wstanie
+    # po 3 sekundach, nie ma powodu czekać pełnych 15.
+    for _ in range(CZAS_OCZEKIWANIA_NA_SPOTIFY // ODSTEP_SPRAWDZANIA):
+        time.sleep(ODSTEP_SPRAWDZANIA)
+
+        urzadzenia = sp.devices()["devices"]
+        if not urzadzenia:
+            continue
+
+        # Świeżo uruchomione Spotify JEST widoczne w API, ale ma is_active=False,
+        # bo jeszcze nic nie gra. Dlatego nie szukamy tu aktywnego urządzenia —
+        # bierzemy pierwsze z brzegu. start_playback() z podanym device_id
+        # sam przełączy na nie odtwarzanie.
+        aktywne = next((u for u in urzadzenia if u["is_active"]), None)
+        urzadzenie = aktywne or urzadzenia[0]
+
+        print(f"Spotify gotowe: {urzadzenie['name']}")
+        return urzadzenie["id"]
+
+    return None
+
+
 def zagraj_piosenke(tytul, wykonawca=None):
     """
     Wygodne "wszystko na raz" — funkcja, którą docelowo zawoła Jarvis
     po rozpoznaniu komendy głosowej: zaloguj → znajdź → sprawdź urządzenie → graj.
 
-    Zwraca: komunikat do wypowiedzenia użytkownikowi.
+    Zwraca: (komunikat dla użytkownika, czy się udało).
+    Flaga sukcesu jest potrzebna GUI — decyduje, czy koło wróci spokojnie
+    do idle, czy błyśnie na czerwono.
     """
     sp = zaloguj()
 
     uri, opis = znajdz_utwor(sp, tytul, wykonawca)
     if uri is None:
-        return f"Nie znalazłem utworu: {tytul}."
+        return f"Nie znalazłem utworu: {tytul}.", False
 
     device_id, komunikat_urzadzenia = znajdz_aktywne_urzadzenie(sp)
+
+    # Nie ma na czym grać — próbujemy otworzyć aplikację Spotify i poczekać,
+    # aż zgłosi się do API jako urządzenie.
     if device_id is None:
-        return komunikat_urzadzenia
+        print(komunikat_urzadzenia)
+        device_id = uruchom_i_poczekaj_na_spotify(sp)
+
+    if device_id is None:
+        return (
+            "Nie udało mi się uruchomić Spotify. "
+            "Otwórz aplikację ręcznie i spróbuj jeszcze raz.",
+            False,
+        )
 
     sukces, komunikat = odtworz(sp, uri, device_id)
     if not sukces:
-        return komunikat
+        return komunikat, False
 
-    return f"Odtwarzam {opis}."
+    return f"Odtwarzam {opis}.", True
 
 
 # --- Blok testowy: uruchom `python spotify_controller.py`, żeby sprawdzić cały flow ---
