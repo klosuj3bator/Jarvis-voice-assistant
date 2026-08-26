@@ -16,12 +16,15 @@ krótkie wyjście, liczy się szybkość odpowiedzi (Jarvis ma reagować od razu
 """
 
 import json
+import logging
 import os
 
 import anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # Model wybrany pod kątem szybkości — klasyfikacja komendy to proste zadanie.
 MODEL = "claude-haiku-4-5-20251001"
@@ -41,7 +44,7 @@ rozpoznany z mowy użytkownika (po polsku lub po angielsku) i zamieniasz go na J
 Odpowiadasz WYŁĄCZNIE czystym obiektem JSON. Bez bloków kodu, bez ```json, \
 bez wyjaśnień, bez tekstu przed ani po.
 
-Dozwolone są dokładnie trzy formaty:
+Dozwolone są dokładnie cztery formaty:
 
 1. Odtworzenie muzyki:
 {"action": "play_song", "song": "tytuł utworu", "artist": "wykonawca lub null"}
@@ -49,14 +52,23 @@ Dozwolone są dokładnie trzy formaty:
 2. Otwarcie aplikacji:
 {"action": "open_app", "app_name": "nazwa aplikacji"}
 
-3. Cokolwiek innego, czego nie rozumiesz lub co nie pasuje do powyższych:
+3. Zamknięcie aplikacji:
+{"action": "close_app", "app_name": "nazwa aplikacji"}
+
+4. Cokolwiek innego, czego nie rozumiesz lub co nie pasuje do powyższych:
 {"action": "unknown"}
 
 Zasady:
 - Jeśli użytkownik nie podał wykonawcy, ustaw "artist" na null (nie zgaduj wykonawcy).
 - Nie tłumacz tytułów piosenek ani nazw aplikacji — przepisz je tak, jak padły.
 - Usuń z tytułu słowa komendy ("puść", "włącz", "zagraj", "play", "odtwórz").
-- Nazwę aplikacji podaj małymi literami, jednym słowem, jeśli to możliwe.
+- Nazwę aplikacji podaj małymi literami.
+- OTWIERANIE rozpoznajesz po słowach: otwórz, uruchom, włącz, odpal, open, launch, start.
+- ZAMYKANIE rozpoznajesz po słowach: zamknij, wyłącz, zakończ, ubij, close, quit, exit, kill.
+- Uwaga na słowo "włącz": przy muzyce znaczy odtwarzanie ("włącz piosenkę"),
+  a przy aplikacji otwieranie ("włącz Chrome"). "Wyłącz" zawsze znaczy zamykanie.
+- Jeśli nie masz pewności, czy chodzi o otwarcie czy zamknięcie, zwróć "unknown".
+  Nigdy nie zgaduj między open_app a close_app.
 
 Przykłady:
 
@@ -74,6 +86,18 @@ Wyjście: {"action": "open_app", "app_name": "przeglądarka"}
 
 Wejście: "open spotify"
 Wyjście: {"action": "open_app", "app_name": "spotify"}
+
+Wejście: "wyłącz League of Legends"
+Wyjście: {"action": "close_app", "app_name": "league of legends"}
+
+Wejście: "zamknij chrome"
+Wyjście: {"action": "close_app", "app_name": "chrome"}
+
+Wejście: "zakończ discorda"
+Wyjście: {"action": "close_app", "app_name": "discord"}
+
+Wejście: "close notepad"
+Wyjście: {"action": "close_app", "app_name": "notepad"}
 
 Wejście: "jaka jest dzisiaj pogoda"
 Wyjście: {"action": "unknown"}"""
@@ -160,7 +184,9 @@ def rozpoznaj_komende(tekst):
     except anthropic.APIError as e:
         # Brak internetu, zły klucz, limit zapytań — Jarvis ma się nie wysypać,
         # tylko powiedzieć, że nie zrozumiał, i wrócić do nasłuchu.
-        print(f"[ROUTER] Błąd Claude API: {e}")
+        # logger.exception zapisuje PEŁNY ślad wyjątku, nie samą jego treść.
+        # Przy diagnozie z dziennika to różnica między "wiem co", a "wiem gdzie".
+        logger.exception("Błąd Claude API")
         return {"action": "unknown"}
 
     # Odpowiedź to lista bloków treści — bierzemy tekst z pierwszego bloku typu "text".
@@ -171,13 +197,13 @@ def rozpoznaj_komende(tekst):
     wynik = _wyciagnij_json(surowy_tekst)
 
     if wynik is None:
-        print(f"[ROUTER] Model zwrócił coś, co nie jest JSON-em: {surowy_tekst!r}")
+        logger.warning("Model zwrócił coś, co nie jest JSON-em: %r", surowy_tekst)
         return {"action": "unknown"}
 
     # Ostatnia linia obrony: jeśli w JSON-ie brakuje "action" albo jest nieznana wartość,
     # traktujemy to jak komendę nierozpoznaną.
-    if wynik.get("action") not in ("play_song", "open_app", "unknown"):
-        print(f"[ROUTER] Nieznana akcja w odpowiedzi modelu: {wynik}")
+    if wynik.get("action") not in ("play_song", "open_app", "close_app", "unknown"):
+        logger.warning("Nieznana akcja w odpowiedzi modelu: %s", wynik)
         return {"action": "unknown"}
 
     return wynik
@@ -185,14 +211,22 @@ def rozpoznaj_komende(tekst):
 
 # --- Test samego routera: `python router.py` (bez mikrofonu, na wpisanym tekście) ---
 if __name__ == "__main__":
+    from logging_setup import skonfiguruj_logowanie
+
+    skonfiguruj_logowanie()
+
     PRZYKLADY = [
         "puść mi Bohemian Rhapsody Queen",
         "włącz piosenkę Mury",
         "play Smells Like Teen Spirit by Nirvana",
         "otwórz spotify",
+        "wyłącz League of Legends",
+        "zamknij chrome",
+        "zakończ discorda",
+        "close notepad",
         "jaka jest dzisiaj pogoda",
     ]
 
     for przyklad in PRZYKLADY:
-        print(f"\nWejście: {przyklad}")
-        print(f"Wyjście: {rozpoznaj_komende(przyklad)}")
+        logger.info("Wejście: %s", przyklad)
+        logger.info("Wyjście: %s", rozpoznaj_komende(przyklad))

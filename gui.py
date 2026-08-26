@@ -39,12 +39,20 @@ emituje sygnał. Faktyczna zmiana dzieje się w slocie _zastosuj_stan(),
 który zawsze wykonuje się w wątku GUI — niezależnie od tego, kto zawołał.
 """
 
+import logging
 import math
+import os
 import sys
 
 from PySide6.QtCore import QRectF, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap, QRadialGradient
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
+
+logger = logging.getLogger(__name__)
+
+# Ikona zasobnika. Generujemy ją przy pierwszym uruchomieniu — podmień plik
+# na własną grafikę, kiedy będziesz miał lepszą (32x32 albo 64x64 PNG).
+SCIEZKA_IKONY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_icon.png")
 
 # --- Wygląd okienka ---
 
@@ -322,12 +330,182 @@ class JarvisOrb(QWidget):
         self._punkt_chwytu = None
 
     def mouseDoubleClickEvent(self, event):
-        """Podwójne kliknięcie zamyka okienko — bezramkowe okno nie ma krzyżyka."""
-        self.close()
+        """
+        Podwójne kliknięcie CHOWA kulę (bezramkowe okno nie ma krzyżyka).
+
+        Celowo hide(), a nie close() — program ma dalej działać w tle.
+        Z powrotem przywołasz kulę z menu ikony w zasobniku, tam też
+        znajdziesz opcję rzeczywistego zamknięcia Jarvisa.
+        """
+        self.hide()
+        logger.info("Kula ukryta podwójnym kliknięciem.")
+
+
+def utworz_plik_ikony(sciezka=SCIEZKA_IKONY, rozmiar=64):
+    """
+    Generuje prostą ikonę zasobnika — świecące niebieskie kółko — jeśli plik
+    jeszcze nie istnieje.
+
+    To rozwiązanie tymczasowe, żeby projekt działał bez dostarczania grafiki
+    z zewnątrz. Podmień jarvis_icon.png na własny plik, kiedy będziesz miał lepszy
+    — kod go po prostu wczyta, bo generuje tylko wtedy, gdy pliku brakuje.
+
+    Zwraca: ścieżkę do pliku ikony.
+    """
+    if os.path.exists(sciezka):
+        return sciezka
+
+    # QPixmap z kanałem alfa — przezroczyste tło, żeby ikona wyglądała dobrze
+    # zarówno na jasnym, jak i ciemnym pasku zadań.
+    pixmapa = QPixmap(rozmiar, rozmiar)
+    pixmapa.fill(Qt.transparent)
+
+    malarz = QPainter(pixmapa)
+    malarz.setRenderHint(QPainter.Antialiasing)
+
+    srodek = rozmiar / 2.0
+    gradient = QRadialGradient(srodek, srodek, srodek)
+    gradient.setColorAt(0.0, QColor(210, 245, 255, 255))
+    gradient.setColorAt(0.4, QColor(0, 190, 255, 255))
+    gradient.setColorAt(1.0, QColor(0, 90, 160, 210))
+
+    malarz.setBrush(gradient)
+    malarz.setPen(Qt.NoPen)
+    # Mały margines (10%), żeby kółko nie dotykało krawędzi ikony.
+    malarz.drawEllipse(QRectF(rozmiar * 0.05, rozmiar * 0.05, rozmiar * 0.9, rozmiar * 0.9))
+    malarz.end()
+
+    pixmapa.save(sciezka)
+    logger.info("Wygenerowałem ikonę zasobnika: %s", sciezka)
+
+    return sciezka
+
+
+class TrayJarvisa:
+    """
+    Ikona w zasobniku systemowym (na Windows: obszar przy zegarku, często
+    schowany pod strzałką "Pokaż ukryte ikony").
+
+
+    JAK DZIAŁA QSystemTrayIcon
+    ==========================
+
+    QSystemTrayIcon to nie okno, tylko uchwyt do ikony, którą rysuje sam system
+    operacyjny w swoim pasku. Składa się z trzech rzeczy:
+
+      1. IKONA (QIcon) — obrazek, który widać przy zegarku.
+      2. MENU KONTEKSTOWE (QMenu) — pokazywane po kliknięciu prawym przyciskiem.
+         Menu podpinamy przez setContextMenu(); resztą (gdzie je wyświetlić,
+         jak zamknąć po kliknięciu) zajmuje się system.
+      3. SYGNAŁ activated — informuje o kliknięciach lewym, podwójnych itd.
+
+    Trzy rzeczy, które łatwo przeoczyć:
+
+      - Trzeba wywołać .show(). Bez tego ikona istnieje w pamięci,
+        ale nigdzie jej nie widać.
+
+      - Musisz trzymać w Pythonie referencję do obiektu tray ORAZ do menu.
+        Jeśli powstaną jako zmienne lokalne w funkcji, garbage collector
+        posprząta je po jej zakończeniu i ikona zniknie po ułamku sekundy.
+        Dlatego trzymamy je jako pola tej klasy, a main.py trzyma jej instancję.
+
+      - Trzeba ustawić app.setQuitOnLastWindowClosed(False). Domyślnie Qt kończy
+        program po zamknięciu ostatniego okna — czyli ukrycie kuli przez menu
+        zabiłoby całą aplikację, mimo że ikona w zasobniku dalej by tam była.
+    """
+
+    def __init__(self, app, orb, przy_zamknieciu=None):
+        """
+        app             — obiekt QApplication
+        orb             — okienko z pulsującym kołem (HUD na pulpicie)
+        przy_zamknieciu — opcjonalna funkcja sprzątająca, wołana przed wyjściem
+                          (main.py przekazuje tu zatrzymanie wątku nasłuchu)
+        """
+        self._app = app
+        self._orb = orb
+        self._przy_zamknieciu = przy_zamknieciu
+
+        # Bez tego ukrycie kuli ("Pokaż/Ukryj") zamknęłoby cały program.
+        app.setQuitOnLastWindowClosed(False)
+
+        ikona = QIcon(utworz_plik_ikony())
+
+        # Menu MUSI zostać polem obiektu — patrz uwaga o referencjach powyżej.
+        self._menu = QMenu()
+
+        self._akcja_widocznosc = QAction("Ukryj kulę", self._menu)
+        self._akcja_widocznosc.triggered.connect(self._przelacz_widocznosc)
+        self._menu.addAction(self._akcja_widocznosc)
+
+        # Kulę można ukryć także podwójnym kliknięciem, z pominięciem menu.
+        # aboutToShow odpala się tuż przed pokazaniem menu, więc to dobre miejsce,
+        # żeby napis zawsze zgadzał się z rzeczywistym stanem okna.
+        self._menu.aboutToShow.connect(self._odswiez_napis)
+
+        self._menu.addSeparator()
+
+        akcja_zamknij = QAction("Zamknij Jarvisa", self._menu)
+        akcja_zamknij.triggered.connect(self._zamknij)
+        self._menu.addAction(akcja_zamknij)
+
+        self._tray = QSystemTrayIcon(ikona, app)
+        self._tray.setToolTip("Jarvis — asystent głosowy")
+        self._tray.setContextMenu(self._menu)
+
+        # Lewym przyciskiem też wygodnie przełączać widoczność kuli.
+        self._tray.activated.connect(self._klikniecie)
+
+        self._tray.show()
+        logger.info("Ikona zasobnika systemowego uruchomiona.")
+
+    def _klikniecie(self, powod):
+        """
+        Reakcja na kliknięcie ikony. `powod` mówi, jakiego rodzaju było kliknięcie
+        — reagujemy tylko na pojedyncze lewe (Trigger), bo prawe obsługuje menu.
+        """
+        if powod == QSystemTrayIcon.Trigger:
+            self._przelacz_widocznosc()
+
+    def _odswiez_napis(self):
+        """Dopasowuje napis w menu do tego, czy kula jest aktualnie widoczna."""
+        self._akcja_widocznosc.setText(
+            "Ukryj kulę" if self._orb.isVisible() else "Pokaż kulę"
+        )
+
+    def _przelacz_widocznosc(self):
+        """Pokazuje albo ukrywa kulę i aktualizuje napis w menu."""
+        if self._orb.isVisible():
+            self._orb.hide()
+            logger.info("Kula ukryta.")
+        else:
+            self._orb.show()
+            logger.info("Kula pokazana.")
+
+        self._odswiez_napis()
+
+    def _zamknij(self):
+        """
+        Kończy cały program: najpierw sprząta (wątek nasłuchu, mikrofon),
+        potem chowa ikonę i zatrzymuje pętlę zdarzeń Qt.
+
+        Kolejność ma znaczenie — ikona zasobnika potrafi zostać widoczna
+        jeszcze chwilę po zamknięciu programu, jeśli nie ukryjemy jej jawnie.
+        """
+        logger.info("Zamykanie przez menu zasobnika.")
+
+        if self._przy_zamknieciu is not None:
+            self._przy_zamknieciu()
+
+        self._tray.hide()
+        self._app.quit()
 
 
 # --- Test: `python gui.py` — cyklicznie przełącza stany co 2 sekundy ---
 if __name__ == "__main__":
+    from logging_setup import skonfiguruj_logowanie
+
+    skonfiguruj_logowanie()
+
     app = QApplication(sys.argv)
 
     orb = JarvisOrb()
@@ -338,26 +516,28 @@ if __name__ == "__main__":
 
     orb.show()
 
+    # Referencję do tray trzeba przechować — inaczej ikona zniknie po chwili.
+    tray = TrayJarvisa(app, orb)
+
     KOLEJNOSC = ["idle", "listening", "processing", "error"]
     indeks = 0
 
     def nastepny_stan():
-        """Przełącza na kolejny stan z listy i wypisuje go w konsoli."""
+        """Przełącza na kolejny stan z listy i zapisuje go w dzienniku."""
         global indeks
         stan = KOLEJNOSC[indeks % len(KOLEJNOSC)]
         indeks += 1
-        print(f"[GUI] stan: {stan}")
+        logger.info("[GUI] stan: %s", stan)
         orb.set_state(stan)
 
     # Uwaga: ten timer żyje w wątku GUI, więc to NIE jest test międzywątkowy —
-    # sprawdza tylko, jak stany wyglądają. Prawdziwe wywołania z wątku
-    # nasłuchującego podepniemy w kolejnym kroku i zadziałają tak samo,
-    # bo set_state() i tak przechodzi przez sygnał.
+    # sprawdza tylko, jak stany wyglądają.
     timer_demo = QTimer()
     timer_demo.timeout.connect(nastepny_stan)
     timer_demo.start(2000)
 
     nastepny_stan()
 
-    print("Przeciągnij koło myszą, żeby je przesunąć. Podwójne kliknięcie zamyka.")
+    logger.info("Przeciągnij koło myszą, żeby je przesunąć. "
+                "Prawy klik w ikonę zasobnika otwiera menu.")
     sys.exit(app.exec())

@@ -5,7 +5,7 @@ Wystawia jedną funkcję dla reszty programu: sluchaj_komendy().
 Blokuje wykonanie, czeka na "Hey Jarvis", nagrywa kilka sekund,
 przepuszcza je przez Whispera i zwraca rozpoznany tekst jako string.
 
-Główna pętla programu NIE żyje już w tym pliku — jest w main.py.
+Główna pętla programu NIE żyje w tym pliku — jest w main.py.
 Ten moduł odpowiada wyłącznie za: mikrofon -> tekst.
 
 Podział na dwa etapy (tani detektor + drogi Whisper) jest celowy: Whisper jest
@@ -15,12 +15,18 @@ nie wymaga konta, klucza API ani sieci (poza jednorazowym pobraniem modeli).
 """
 
 import atexit
+import logging
+import threading
 
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 from openwakeword.model import Model as WakeWordModel
 from openwakeword.utils import download_models
+
+# Logger nazwany jak moduł — w jarvis.log widać wtedy, że linia przyszła stąd.
+# Konfiguracją (dokąd zapisywać) zajmuje się main.py, nie ten plik.
+logger = logging.getLogger(__name__)
 
 # --- Ustawienia, które najczęściej będziesz chciał zmieniać ---
 
@@ -61,6 +67,32 @@ _detektor = None
 _model_whisper = None
 _stream = None
 
+# Sygnał "kończymy". Event to bezpieczny międzywątkowo przełącznik:
+# wątek GUI go ustawia przy zamykaniu programu, a wątek nasłuchu regularnie
+# sprawdza jego stan i grzecznie wychodzi z pętli.
+#
+# To jest właśnie powód, dla którego pętle poniżej czytają mikrofon
+# małymi porcjami zamiast jednym wielkim blokiem: między porcjami mamy
+# okazję zajrzeć na ten przełącznik. Gdybyśmy czytali 5 sekund naraz,
+# zamknięcie programu musiałoby czekać na koniec tego odczytu.
+_zatrzymaj_sie = threading.Event()
+
+
+def zatrzymaj():
+    """
+    Prosi pętlę nasłuchu, żeby się zakończyła.
+
+    BEZPIECZNE do wywołania z dowolnego wątku — to woła main.py przy zamykaniu
+    programu z menu w zasobniku systemowym.
+    """
+    logger.info("Otrzymano prośbę o zatrzymanie nasłuchu.")
+    _zatrzymaj_sie.set()
+
+
+def czy_zatrzymano():
+    """Zwraca True, jeśli poproszono o zakończenie pracy."""
+    return _zatrzymaj_sie.is_set()
+
 
 def _przygotuj():
     """
@@ -87,6 +119,7 @@ def _przygotuj():
         blocksize=DLUGOSC_RAMKI,
     )
     _stream.start()
+    logger.info("Mikrofon otwarty: %s", sd.query_devices(kind="input")["name"])
 
     # Strumień żyje przez cały czas działania programu, więc nie ma tu bloku `with`.
     # atexit gwarantuje, że mikrofon zostanie zwolniony przy wyjściu — także po Ctrl+C.
@@ -102,7 +135,7 @@ def _utworz_detektor():
 
     Zwraca: obiekt Model gotowy do wywołania .predict().
     """
-    print(f"Przygotowuję detektor wake worda '{MODEL_WAKE_WORD}'...")
+    logger.info("Przygotowuję detektor wake worda '%s'...", MODEL_WAKE_WORD)
 
     # Pobiera wskazany model + modele pomocnicze (melspectrogram, embedding, VAD).
     # Funkcja sama sprawdza, czy pliki już są — przy kolejnych startach nic nie robi.
@@ -116,7 +149,7 @@ def _utworz_detektor():
         inference_framework="onnx",
     )
 
-    print("Detektor gotowy.")
+    logger.info("Detektor gotowy.")
     return detektor
 
 
@@ -128,9 +161,10 @@ def _wczytaj_model_whisper():
 
     Zwraca: obiekt WhisperModel.
     """
-    print(f"Wczytuję model Whisper '{MODEL_WHISPER}' (przy pierwszym razie może się pobierać)...")
+    logger.info("Wczytuję model Whisper '%s' (przy pierwszym razie może się pobierać)...",
+                MODEL_WHISPER)
     model = WhisperModel(MODEL_WHISPER, device="cpu", compute_type=COMPUTE_TYPE)
-    print("Model gotowy.")
+    logger.info("Model Whisper gotowy.")
     return model
 
 
@@ -140,10 +174,14 @@ def _czekaj_na_wake_word():
 
     Dla każdej 80-milisekundowej porcji audio detektor zwraca słownik
     {nazwa_modelu: pewność 0.0-1.0}. Czekamy, aż pewność przekroczy próg.
-    """
-    print("\n[NASŁUCH] Czekam na 'Hey Jarvis'... (Ctrl+C żeby zakończyć)")
 
-    while True:
+    Zwraca: True gdy wykryto słowo, False gdy poproszono o zatrzymanie programu.
+    """
+    logger.info("[NASŁUCH] Czekam na 'Hey Jarvis'...")
+
+    # Warunek pętli sprawdza przełącznik co ~80 ms, więc zamknięcie programu
+    # jest natychmiastowe nawet wtedy, gdy Jarvis stoi bezczynnie godzinami.
+    while not _zatrzymaj_sie.is_set():
         # Czytamy dokładnie tyle próbek, ile detektor oczekuje w jednej porcji.
         dane, _ = _stream.read(DLUGOSC_RAMKI)
         # Mikrofon zwraca kształt (n, 1) — spłaszczamy do zwykłej listy próbek.
@@ -157,25 +195,36 @@ def _czekaj_na_wake_word():
             # reset() czyści wewnętrzny bufor detektora. Bez tego przez chwilę
             # pamiętałby świeże wykrycie i po powrocie odpalałby się od razu ponownie.
             _detektor.reset()
-            return
+            return True
+
+    return False
 
 
 def _nagraj(sekundy=CZAS_NAGRANIA):
     """
     Nagrywa zadaną liczbę sekund audio z otwartego strumienia mikrofonu.
 
-    Zwraca: tablicę numpy float32 w zakresie -1.0..1.0 — czyli w formacie,
-    którego oczekuje Whisper.
+    Czytamy porcjami po 80 ms zamiast jednym blokiem, żeby dało się przerwać
+    nagrywanie w trakcie, gdy program jest zamykany.
+
+    Zwraca: tablicę numpy float32 (-1.0..1.0) — format, którego oczekuje Whisper.
+    Zwraca pustą tablicę, jeśli nagrywanie zostało przerwane.
     """
-    print(f"[NAGRYWAM] Mów teraz ({sekundy} s)...")
+    logger.info("[NAGRYWAM] Mów teraz (%s s)...", sekundy)
 
-    liczba_probek = int(SAMPLE_RATE * sekundy)
-    dane, _ = _stream.read(liczba_probek)
+    liczba_porcji = int(SAMPLE_RATE * sekundy / DLUGOSC_RAMKI)
+    porcje = []
 
-    print("[NAGRYWAM] Koniec nagrania, rozpoznaję...")
+    for _ in range(liczba_porcji):
+        if _zatrzymaj_sie.is_set():
+            return np.array([], dtype=np.float32)
+        dane, _ = _stream.read(DLUGOSC_RAMKI)
+        porcje.append(dane.flatten())
+
+    logger.info("[NAGRYWAM] Koniec nagrania, rozpoznaję...")
 
     # Mikrofon daje int16 (-32768..32767), a Whisper chce float32 (-1.0..1.0).
-    return dane.flatten().astype(np.float32) / 32768.0
+    return np.concatenate(porcje).astype(np.float32) / 32768.0
 
 
 def _rozpoznaj_mowe(audio):
@@ -226,7 +275,7 @@ def sluchaj_komendy(callback_stanu=None):
         a testowanie go nie wymaga uruchamiania okienka.
 
     Zwraca: rozpoznany tekst (string). Pusty string, jeśli nic nie usłyszał
-    — main.py może wtedy po prostu wrócić do nasłuchu.
+    albo jeśli program jest zamykany.
     """
 
     def zglos(stan):
@@ -241,11 +290,16 @@ def sluchaj_komendy(callback_stanu=None):
     # na starcie każdego cyklu, skasowalibyśmy czerwony błysk po poprzednim
     # błędzie — pętla wraca tu w kilka milisekund po jego zapaleniu,
     # więc praktycznie nigdy nie zdążyłbyś go zobaczyć.
-    _czekaj_na_wake_word()
-    print("[WYKRYTO] Usłyszałem 'Hey Jarvis'!")
+    if not _czekaj_na_wake_word():
+        return ""  # program jest zamykany
+
+    logger.info("[WYKRYTO] Usłyszałem 'Hey Jarvis'!")
 
     zglos("listening")
     audio = _nagraj()
+
+    if audio.size == 0:
+        return ""  # nagrywanie przerwane przez zamykanie programu
 
     zglos("processing")
     tekst, jezyk, pewnosc = _rozpoznaj_mowe(audio)
@@ -254,9 +308,9 @@ def sluchaj_komendy(callback_stanu=None):
     _oproznij_bufor()
 
     if tekst:
-        print(f"[TEKST] ({jezyk}, {pewnosc:.0%}) {tekst}")
+        logger.info("[TEKST] (%s, %.0f%%) %s", jezyk, pewnosc * 100, tekst)
     else:
-        print("[TEKST] Nic nie usłyszałem.")
+        logger.info("[TEKST] Nic nie usłyszałem.")
 
     return tekst
 
@@ -265,6 +319,10 @@ def zamknij():
     """
     Zamyka strumień mikrofonu. Wołane automatycznie przy końcu programu (atexit),
     ale możesz je wywołać ręcznie, jeśli chcesz zwolnić mikrofon wcześniej.
+
+    Uwaga na kolejność: najpierw zatrzymaj(), potem poczekaj aż wątek nasłuchu
+    skończy, i dopiero wtedy zamknij(). Zamknięcie strumienia, z którego inny
+    wątek właśnie czyta, potrafi wysypać program.
     """
     global _stream
 
@@ -272,20 +330,26 @@ def zamknij():
         _stream.stop()
         _stream.close()
         _stream = None
+        logger.info("Mikrofon zwolniony.")
 
 
 # --- Test samego modułu: `python wake_word_listener.py` ---
 # Pełnego Jarvisa uruchamiasz przez `python main.py` — tutaj sprawdzasz tylko,
 # czy mikrofon, wake word i transkrypcja działają.
 if __name__ == "__main__":
-    print("Dostępne urządzenia wejściowe:")
+    from logging_setup import skonfiguruj_logowanie
+
+    skonfiguruj_logowanie()
+
+    logger.info("Dostępne urządzenia wejściowe:")
     for i, urzadzenie in enumerate(sd.query_devices()):
         if urzadzenie["max_input_channels"] > 0:
-            print(f"  [{i}] {urzadzenie['name']}")
-    print(f"Używam domyślnego: {sd.query_devices(kind='input')['name']}\n")
+            logger.info("  [%d] %s", i, urzadzenie["name"])
 
     try:
         while True:
             sluchaj_komendy()
     except KeyboardInterrupt:
-        print("\nZatrzymuję nasłuch. Do zobaczenia!")
+        logger.info("Zatrzymuję nasłuch.")
+        zatrzymaj()
+        zamknij()

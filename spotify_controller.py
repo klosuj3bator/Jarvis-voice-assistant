@@ -5,6 +5,7 @@ Odpowiada za: logowanie (OAuth), wyszukiwanie utworów i sterowanie odtwarzaniem
 Reszta Jarvisa (mowa, rozpoznawanie komend) będzie tylko wołać funkcje z tego pliku.
 """
 
+import logging
 import os
 import time
 
@@ -15,6 +16,8 @@ from spotipy.oauth2 import SpotifyOAuth
 # Wczytuje zmienne z pliku .env do zmiennych środowiskowych procesu.
 # Dzięki temu klucze API nie siedzą na sztywno w kodzie (i nie trafią na GitHuba).
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # Zakresy uprawnień, o które prosimy użytkownika przy logowaniu.
 # To minimum potrzebne do sterowania odtwarzaniem:
@@ -173,7 +176,7 @@ def uruchom_i_poczekaj_na_spotify(sp):
 
     Zwraca: device_id gotowe do grania, albo None jeśli się nie doczekaliśmy.
     """
-    print("Otwieram aplikację Spotify...")
+    logger.info("Otwieram aplikację Spotify...")
     os.system("start spotify:")
 
     # Odpytujemy w pętli zamiast jednego długiego sleep(): jeśli Spotify wstanie
@@ -192,7 +195,7 @@ def uruchom_i_poczekaj_na_spotify(sp):
         aktywne = next((u for u in urzadzenia if u["is_active"]), None)
         urzadzenie = aktywne or urzadzenia[0]
 
-        print(f"Spotify gotowe: {urzadzenie['name']}")
+        logger.info("Spotify gotowe: %s", urzadzenie["name"])
         return urzadzenie["id"]
 
     return None
@@ -218,7 +221,7 @@ def zagraj_piosenke(tytul, wykonawca=None):
     # Nie ma na czym grać — próbujemy otworzyć aplikację Spotify i poczekać,
     # aż zgłosi się do API jako urządzenie.
     if device_id is None:
-        print(komunikat_urzadzenia)
+        logger.info(komunikat_urzadzenia)
         device_id = uruchom_i_poczekaj_na_spotify(sp)
 
     if device_id is None:
@@ -237,28 +240,31 @@ def zagraj_piosenke(tytul, wykonawca=None):
 
 # --- Blok testowy: uruchom `python spotify_controller.py`, żeby sprawdzić cały flow ---
 if __name__ == "__main__":
+    from logging_setup import skonfiguruj_logowanie
+
+    skonfiguruj_logowanie()
     TESTOWY_TYTUL = "Bohemian Rhapsody"
     TESTOWY_WYKONAWCA = "Queen"
 
-    print("[1/4] Logowanie do Spotify...")
+    logger.info("[1/4] Logowanie do Spotify...")
     sp = zaloguj()
     ja = sp.current_user()
-    print(f"      Zalogowano jako: {ja['display_name']}")
+    logger.info("      Zalogowano jako: %s", ja["display_name"])
 
-    print(f"[2/4] Szukam utworu: {TESTOWY_TYTUL} - {TESTOWY_WYKONAWCA}")
+    logger.info("[2/4] Szukam utworu: %s - %s", TESTOWY_TYTUL, TESTOWY_WYKONAWCA)
     uri, opis = znajdz_utwor(sp, TESTOWY_TYTUL, TESTOWY_WYKONAWCA)
     if uri is None:
-        print("      Nie znaleziono utworu. Koniec testu.")
+        logger.error("      Nie znaleziono utworu. Koniec testu.")
         raise SystemExit(1)
-    print(f"      Znaleziono: {opis}")
-    print(f"      URI: {uri}")
+    logger.info("      Znaleziono: %s", opis)
+    logger.info("      URI: %s", uri)
 
-    print("[3/4] Sprawdzam urządzenia...")
+    logger.info("[3/4] Sprawdzam urządzenia...")
     device_id, komunikat = znajdz_aktywne_urzadzenie(sp)
-    print(f"      {komunikat}")
+    logger.info("      %s", komunikat)
     if device_id is None:
         raise SystemExit(1)
 
-    print("[4/4] Odtwarzam...")
+    logger.info("[4/4] Odtwarzam...")
     sukces, komunikat = odtworz(sp, uri, device_id)
-    print(f"      {komunikat}")
+    logger.info("      %s", komunikat)
