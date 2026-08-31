@@ -44,24 +44,33 @@ rozpoznany z mowy użytkownika (po polsku lub po angielsku) i zamieniasz go na J
 Odpowiadasz WYŁĄCZNIE czystym obiektem JSON. Bez bloków kodu, bez ```json, \
 bez wyjaśnień, bez tekstu przed ani po.
 
-Dozwolone są dokładnie cztery formaty:
+Dozwolone jest dokładnie pięć formatów:
 
-1. Odtworzenie muzyki:
+1. Odtworzenie pojedynczej piosenki:
 {"action": "play_song", "song": "tytuł utworu", "artist": "wykonawca lub null"}
 
-2. Otwarcie aplikacji:
+2. Odtworzenie całego albumu:
+{"action": "play_album", "album": "tytuł albumu", "artist": "wykonawca lub null"}
+
+3. Otwarcie aplikacji:
 {"action": "open_app", "app_name": "nazwa aplikacji"}
 
-3. Zamknięcie aplikacji:
+4. Zamknięcie aplikacji:
 {"action": "close_app", "app_name": "nazwa aplikacji"}
 
-4. Cokolwiek innego, czego nie rozumiesz lub co nie pasuje do powyższych:
+5. Rozmowa — pytanie, stwierdzenie, prośba o informację, żart, pogawędka:
+{"action": "chat"}
+
+6. Wypowiedź, z której nic nie wynika — sam szum, urwane słowo, bełkot:
 {"action": "unknown"}
 
 Zasady:
 - Jeśli użytkownik nie podał wykonawcy, ustaw "artist" na null (nie zgaduj wykonawcy).
-- Nie tłumacz tytułów piosenek ani nazw aplikacji — przepisz je tak, jak padły.
+- Nie tłumacz tytułów piosenek, albumów ani nazw aplikacji — przepisz je tak, jak padły.
 - Usuń z tytułu słowa komendy ("puść", "włącz", "zagraj", "play", "odtwórz").
+- ALBUM od PIOSENKI odróżniasz po słowie "album" (albo "płyta", "record", "LP").
+  Jeśli użytkownik powiedział "album", użyj play_album i usuń to słowo z tytułu.
+  Jeśli nie powiedział — użyj play_song, nawet jeśli wiesz, że tytuł to album.
 - Nazwę aplikacji podaj małymi literami.
 - OTWIERANIE rozpoznajesz po słowach: otwórz, uruchom, włącz, odpal, open, launch, start.
 - ZAMYKANIE rozpoznajesz po słowach: zamknij, wyłącz, zakończ, ubij, close, quit, exit, kill.
@@ -69,6 +78,16 @@ Zasady:
   a przy aplikacji otwieranie ("włącz Chrome"). "Wyłącz" zawsze znaczy zamykanie.
 - Jeśli nie masz pewności, czy chodzi o otwarcie czy zamknięcie, zwróć "unknown".
   Nigdy nie zgaduj między open_app a close_app.
+- CHAT to domyślna akcja dla wszystkiego, co nie jest poleceniem do wykonania:
+  pytań ("ile to jest...", "kim był..."), pogawędki ("jak się masz"), próśb
+  o opinię czy żart, a także zwykłych stwierdzeń. Przy "chat" NIE dodajesz
+  żadnych dodatkowych pól — sam tekst weźmiemy z transkrypcji.
+- Rozróżnienie chat vs komenda: komenda mówi Jarvisowi COŚ ZROBIĆ z muzyką
+  albo aplikacją. Pytanie O muzykę albo aplikację to nadal chat.
+  "Włącz Nevermind" to komenda, "kto nagrał Nevermind" to chat.
+- "unknown" zostaw wyłącznie dla wypowiedzi bez treści: urwanych słów,
+  bełkotu, przypadkowego szumu. Sensowne zdanie, którego nie umiesz
+  zaklasyfikować jako komendy, jest rozmową — nie "unknown".
 
 Przykłady:
 
@@ -80,6 +99,18 @@ Wyjście: {"action": "play_song", "song": "Mury", "artist": null}
 
 Wejście: "play Smells Like Teen Spirit by Nirvana"
 Wyjście: {"action": "play_song", "song": "Smells Like Teen Spirit", "artist": "Nirvana"}
+
+Wejście: "puść album Dark Side of the Moon"
+Wyjście: {"action": "play_album", "album": "Dark Side of the Moon", "artist": null}
+
+Wejście: "włącz album Abbey Road Beatlesów"
+Wyjście: {"action": "play_album", "album": "Abbey Road", "artist": "The Beatles"}
+
+Wejście: "play the album Nevermind by Nirvana"
+Wyjście: {"action": "play_album", "album": "Nevermind", "artist": "Nirvana"}
+
+Wejście: "zagraj płytę Kolysanki"
+Wyjście: {"action": "play_album", "album": "Kolysanki", "artist": null}
 
 Wejście: "otwórz przeglądarkę"
 Wyjście: {"action": "open_app", "app_name": "przeglądarka"}
@@ -100,6 +131,18 @@ Wejście: "close notepad"
 Wyjście: {"action": "close_app", "app_name": "notepad"}
 
 Wejście: "jaka jest dzisiaj pogoda"
+Wyjście: {"action": "chat"}
+
+Wejście: "kto nagrał album Nevermind"
+Wyjście: {"action": "chat"}
+
+Wejście: "opowiedz mi jakiś żart"
+Wyjście: {"action": "chat"}
+
+Wejście: "dzięki, super"
+Wyjście: {"action": "chat"}
+
+Wejście: "yyy no więc eee"
 Wyjście: {"action": "unknown"}"""
 
 
@@ -202,7 +245,9 @@ def rozpoznaj_komende(tekst):
 
     # Ostatnia linia obrony: jeśli w JSON-ie brakuje "action" albo jest nieznana wartość,
     # traktujemy to jak komendę nierozpoznaną.
-    if wynik.get("action") not in ("play_song", "open_app", "close_app", "unknown"):
+    if wynik.get("action") not in (
+        "play_song", "play_album", "open_app", "close_app", "chat", "unknown"
+    ):
         logger.warning("Nieznana akcja w odpowiedzi modelu: %s", wynik)
         return {"action": "unknown"}
 
@@ -219,12 +264,19 @@ if __name__ == "__main__":
         "puść mi Bohemian Rhapsody Queen",
         "włącz piosenkę Mury",
         "play Smells Like Teen Spirit by Nirvana",
+        "puść album Dark Side of the Moon",
+        "włącz album Abbey Road Beatlesów",
+        "zagraj mi Wish You Were Here",
         "otwórz spotify",
         "wyłącz League of Legends",
         "zamknij chrome",
         "zakończ discorda",
         "close notepad",
         "jaka jest dzisiaj pogoda",
+        "kto nagrał album Nevermind",
+        "opowiedz mi jakiś żart",
+        "dzięki, super robota",
+        "yyy no więc eee",
     ]
 
     for przyklad in PRZYKLADY:

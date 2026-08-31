@@ -59,13 +59,20 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 import app_launcher
+import chat
 import gui
 import router
 import spotify_controller
+import tts
 import wake_word_listener
 from logging_setup import PLIK_LOGU, skonfiguruj_logowanie
 
 logger = logging.getLogger(__name__)
+
+# Ile sekund ciszy kończy rozmowę i odsyła Jarvisa z powrotem do czuwania.
+# Za mało — rozmowa urywa się, gdy zastanawiasz się nad pytaniem.
+# Za dużo — mikrofon zostaje otwarty na długo po tym, jak skończyłeś.
+LIMIT_CISZY_ROZMOWY_S = 8
 
 # Ile sekund czekamy na grzeczne zakończenie wątku nasłuchu, zanim odpuścimy.
 # Wątek sprawdza przełącznik co ~80 ms, więc w praktyce kończy się od razu;
@@ -96,6 +103,14 @@ def wykonaj_akcje(decyzja):
             decyzja.get("artist"),
         )
 
+    if akcja == "play_album":
+        # Osobna akcja, bo Spotify gra album inaczej niż pojedynczy utwór —
+        # przez context_uri zamiast listy uris. Szczegóły w odtworz_album().
+        return spotify_controller.zagraj_album(
+            decyzja.get("album"),
+            decyzja.get("artist"),
+        )
+
     if akcja == "open_app":
         return app_launcher.otworz_aplikacje(decyzja.get("app_name"))
 
@@ -112,47 +127,84 @@ def wykonaj_akcje(decyzja):
     return "Nie zrozumiałem komendy.", False
 
 
-def petla_jarvisa(orb):
+def powiedz(orb, komunikat):
     """
-    Główna pętla asystenta. Działa w wątku roboczym, nie w wątku GUI.
+    Wypowiada tekst na głos, trzymając kulę w stanie "speaking".
 
-    orb — okienko z animacją; wołamy na nim wyłącznie set_state(),
-          bo tylko ta metoda jest bezpieczna międzywątkowo
-
-    W kółko: słuchaj -> zrozum -> wykonaj -> wróć do słuchania,
-    aż ktoś poprosi o zatrzymanie przez menu w zasobniku.
+    mow() jest blokujące, więc przez cały czas mówienia mikrofon nie nasłuchuje
+    — to nie przypadek, tylko warunek działania całości. Gdyby nasłuch trwał
+    w tle, Jarvis usłyszałby własny głos i albo wykryłby w nim wake word,
+    albo nagrał samego siebie jako kolejną wypowiedź.
     """
-    # Cały korpus w try/except, bo w wątku roboczym nieobsłużony wyjątek
-    # zabiłby ten wątek po cichu: kula dalej by pulsowała, ikona wisiałaby
-    # w zasobniku, a Jarvis po prostu przestałby słuchać, bez śladu na ekranie.
-    # Dzięki temu blokowi trafi przynajmniej do dziennika.
-    try:
-        while not wake_word_listener.czy_zatrzymano():
-            # 1. USZY — blokuje aż do wykrycia wake worda, potem nagrywa i transkrybuje.
+    if not komunikat:
+        return
+
+    orb.set_state("speaking")
+    tts.mow(komunikat)
+
+
+def rozmowa(orb, pierwszy_tekst):
+    """
+    PĘTLA WEWNĘTRZNA — obsługuje jedną sesję rozmowy.
+
+    Zaczyna się od tekstu wypowiedzianego zaraz po "Hey Jarvis" i toczy się
+    dalej BEZ wake worda: po każdej odpowiedzi Jarvis sam nasłuchuje przez
+    chwilę, czy chcesz coś dodać. Kończy się, gdy przez LIMIT_CISZY_ROZMOWY_S
+    nikt się nie odezwie.
+
+    Historia rozmowy żyje TYLKO tutaj, jako zmienna lokalna. To celowe:
+    wyjście z tej funkcji jest równoznaczne z zapomnieniem kontekstu,
+    więc nowa rozmowa nigdy nie odziedziczy strzępów poprzedniej.
+    """
+    historia_rozmowy = []
+    tekst = pierwszy_tekst
+
+    while tekst is not None and not wake_word_listener.czy_zatrzymano():
+        # MÓZG — czy to komenda do wykonania, czy zwykła rozmowa?
+        decyzja = router.rozpoznaj_komende(tekst)
+        logger.info("[DECYZJA] %s", decyzja)
+        akcja = decyzja.get("action")
+
+        if akcja == "chat":
+            # Rozmowa: do Sonneta idzie ORYGINALNY tekst z transkrypcji razem
+            # z historią. Router celowo nie przepisuje treści — jego zadaniem
+            # było tylko stwierdzić, że to rozmowa, a nie polecenie.
             #
-            # Przekazujemy orb.set_state jako callback, więc to sam moduł nasłuchu
-            # przełącza animację na "listening" w chwili, gdy zaczyna nagrywać,
-            # i na "processing", gdy oddaje nagranie Whisperowi. Stąd stan koła
-            # zgadza się z tym, co program faktycznie robi, co do sekundy.
-            tekst = wake_word_listener.sluchaj_komendy(orb.set_state)
+            # Wersja strumieniowa: Jarvis zaczyna mówić pierwsze zdanie, gdy
+            # model dopiero układa drugie. Generator nie może zwrócić historii
+            # (w chwili oddania pierwszego zdania reszty jeszcze nie ma),
+            # więc składamy ją tutaj — z tego, co FAKTYCZNIE zostało wypowiedziane.
+            generator = chat.odpowiedz_rozmowa_stream(tekst, historia_rozmowy)
 
-            # Pusty tekst znaczy albo ciszę, albo że program jest właśnie zamykany.
-            if wake_word_listener.czy_zatrzymano():
-                break
+            # Kula przełącza się na "speaking" dopiero przy pierwszym dźwięku,
+            # a nie już teraz — inaczej świeciłaby "mówię" przez te sekundę
+            # czy dwie, w których model jeszcze myśli, a z głośników nic nie leci.
+            pelna_odpowiedz = tts.mow_strumieniowo(
+                generator, na_start=lambda: orb.set_state("speaking")
+            )
 
-            if not tekst:
-                orb.set_state("idle")
-                continue
+            if pelna_odpowiedz:
+                historia_rozmowy = historia_rozmowy + [
+                    {"role": "user", "content": tekst},
+                    {"role": "assistant", "content": pelna_odpowiedz},
+                ]
+                logger.info("[JARVIS] %s", pelna_odpowiedz)
+            else:
+                # Nic nie padło (błąd API albo syntezy) — nie zapisujemy do historii
+                # pytania bez odpowiedzi, bo zaburzyłoby to przeplot ról.
+                logger.warning("Rozmowa nie zwróciła żadnej treści.")
 
-            # 2. MÓZG — zamienia zdanie na ustrukturyzowaną decyzję.
-            # Koło jest już w stanie "processing", ustawionym przez nasłuch.
-            decyzja = router.rozpoznaj_komende(tekst)
-            logger.info("[DECYZJA] %s", decyzja)
+            orb.set_state("idle")
 
-            # 3. RĘCE — wykonuje decyzję.
-            # Każdy błąd łapiemy tutaj, żeby jedna nieudana komenda nie zabiła
-            # całego asystenta — Jarvis ma błysnąć, zapisać co poszło źle
-            # i słuchać dalej.
+        elif akcja == "unknown":
+            logger.info("[JARVIS] Nie zrozumiałem polecenia.")
+            powiedz(orb, "Nie zrozumiałem polecenia.")
+            orb.set_state("idle")
+
+        else:
+            # RĘCE — konkretna akcja: muzyka albo aplikacja.
+            # Błąd łapiemy tutaj, żeby jedna nieudana komenda nie zabiła
+            # całej sesji — Jarvis ma powiedzieć, co poszło źle, i słuchać dalej.
             try:
                 komunikat, sukces = wykonaj_akcje(decyzja)
             except Exception:
@@ -160,10 +212,62 @@ def petla_jarvisa(orb):
                 komunikat, sukces = "Coś poszło nie tak przy wykonywaniu komendy.", False
 
             logger.info("[JARVIS] %s", komunikat)
+            powiedz(orb, komunikat)
 
-            # Błysk czerwienią sam wraca do idle po chwili (obsługuje to gui.py),
-            # więc tutaj ustawiamy idle tylko przy sukcesie.
+            # Czerwony błysk sam wraca do idle po chwili (obsługuje to gui.py).
             orb.set_state("idle" if sukces else "error")
+
+        if wake_word_listener.czy_zatrzymano():
+            break
+
+        # Nasłuch bez wake worda. None znaczy "cisza — koniec rozmowy".
+        tekst = wake_word_listener.sluchaj_bez_wake_worda(
+            orb.set_state, limit_ciszy_s=LIMIT_CISZY_ROZMOWY_S
+        )
+
+
+def petla_jarvisa(orb):
+    """
+    PĘTLA ZEWNĘTRZNA — czeka na "Hey Jarvis" i oddaje sterowanie rozmowie.
+
+    orb — okienko z animacją; wołamy na nim wyłącznie set_state(),
+          bo tylko ta metoda jest bezpieczna międzywątkowo
+
+    Dwa poziomy zamiast jednego, bo Jarvis ma dwa wyraźnie różne tryby:
+
+        CZUWANIE — mikrofon słucha wyłącznie wake worda. Tanio (openWakeWord),
+                   lokalnie, bez wysyłania czegokolwiek do sieci.
+        ROZMOWA  — po wykryciu wake worda; kolejne wypowiedzi już go nie
+                   wymagają, bo powtarzanie "Hey Jarvis" przed każdym zdaniem
+                   zabijałoby naturalność rozmowy.
+
+    Działa w wątku roboczym, nie w wątku GUI.
+    """
+    # Cały korpus w try/except, bo w wątku roboczym nieobsłużony wyjątek
+    # zabiłby ten wątek po cichu: kula dalej by pulsowała, ikona wisiałaby
+    # w zasobniku, a Jarvis po prostu przestałby słuchać, bez śladu na ekranie.
+    try:
+        while not wake_word_listener.czy_zatrzymano():
+            logger.info("=== TRYB: CZUWANIE (czekam na 'Hey Jarvis') ===")
+
+            # Blokuje aż do wykrycia wake worda, potem nagrywa i transkrybuje.
+            # Przekazujemy orb.set_state jako callback, więc to sam moduł nasłuchu
+            # przełącza animację na "listening" i "processing" — stan kuli zgadza
+            # się z tym, co program faktycznie robi, co do sekundy.
+            tekst = wake_word_listener.sluchaj_komendy(orb.set_state)
+
+            if wake_word_listener.czy_zatrzymano():
+                break
+
+            if not tekst:
+                orb.set_state("idle")
+                continue
+
+            logger.info("=== TRYB: ROZMOWA (wake word już niepotrzebny) ===")
+            rozmowa(orb, tekst)
+            logger.info("=== TRYB: KONIEC ROZMOWY — wracam do czuwania ===")
+
+            orb.set_state("idle")
 
     except Exception:
         logger.exception("Pętla nasłuchu zakończyła się nieoczekiwanym błędem")

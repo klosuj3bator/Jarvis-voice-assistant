@@ -42,13 +42,88 @@ PROG_WYKRYCIA = 0.5
 # Ile sekund nagrywamy po usłyszeniu wake worda. Stała długość — bez wykrywania ciszy.
 CZAS_NAGRANIA = 5
 
-# Model Whispera. "small" to dobry kompromis: wyraźnie lepiej radzi sobie z polskim
-# niż "base", a nadal działa na CPU w kilka sekund. Jeśli będzie za wolno — wpisz "base".
+# Model Whispera: "small" (244 mln parametrów).
+#
+# DLACZEGO NIE "medium" — WYNIKI POMIARÓW
+# =======================================
+# Teoria mówi, że większy model lepiej radzi sobie z obcojęzycznymi nazwami
+# własnymi: Whisper przewiduje kolejne słowa trochę jak autouzupełnianie, więc
+# przy nagraniu po polsku spodziewa się polskich słów, a wtrącone angielskie
+# "The Grind (Deluxe)" nie pasuje do niczego i bywa dopasowywane do najbliższego
+# polskiego brzmienia. Większy model zna więcej angielskich tytułów, więc
+# w założeniu miał zgadywać rzadziej.
+#
+# Pomiar na tym konkretnym tytule pokazał coś odwrotnego (5 s nagrania, CPU, int8):
+#
+#     medium:  54 s  ->  "The Grind The Lux"   (błędnie)
+#     small:   17 s  ->  "The Grind Deluxe"    (poprawnie)
+#
+# Czyli trzy razy wolniej i przy tym gorzej. Większy model nie jest automatycznie
+# lepszy na krótkich, kilkusekundowych komendach — ma więcej swobody, żeby
+# "poprawić" to, co usłyszał, na coś, co wydaje mu się sensowniejsze.
+#
+# Gdybyś kiedyś wracał do medium, rób to razem z GPU — na CPU czas odpowiedzi
+# rośnie do poziomu, przy którym Jarvis przestaje być używalny.
 MODEL_WHISPER = "small"
 
-# int8 = kwantyzacja, czyli model liczy na liczbach całkowitych zamiast zmiennoprzecinkowych.
-# Kilkukrotnie szybciej na CPU, kosztem minimalnej utraty dokładności.
+# Gdzie liczyć: "cuda" = karta NVIDIA, "cpu" = procesor.
+#
+# Wróciliśmy na CPU po nieudanej walce z CUDA na Windows: CTranslate2 uparcie
+# nie znajdował cublas64_12.dll, mimo doinstalowania bibliotek, poprawiania PATH
+# i os.add_dll_directory(). Kod obsługi GPU zostaje na miejscu — wystarczy
+# zmienić te dwie stałe z powrotem na "cuda"/"float16", żeby spróbować ponownie.
+URZADZENIE = "cpu"
+
+# Format liczb, na których model wykonuje obliczenia.
+#
+# RÓŻNICA MIĘDZY int8 (CPU) A float16 (GPU)
+# =========================================
+# Model to miliony liczb (wag). Można je trzymać z różną precyzją:
+#
+#   int8    — liczby całkowite, 8 bitów na wagę. To KWANTYZACJA: oryginalne
+#             wartości zmiennoprzecinkowe są zaokrąglane do 256 poziomów.
+#             Model zajmuje ok. 4x mniej pamięci i liczy szybciej, bo procesory
+#             sprawnie mnożą liczby całkowite. Kosztem jest utrata precyzji —
+#             przy trudnych nagraniach to właśnie ona dokłada się do błędów.
+#             Na CPU to jedyny sensowny wybór, bo tam liczby zmiennoprzecinkowe
+#             są zbyt wolne.
+#
+#   float16 — liczby zmiennoprzecinkowe połówkowej precyzji, 16 bitów na wagę.
+#             Dwa razy mniej pamięci niż standardowe float32, ale karty NVIDIA
+#             mają do nich sprzętowe wsparcie, więc liczą je szybciej niż float32
+#             i DUŻO szybciej niż CPU cokolwiek. Precyzja jest wyraźnie wyższa
+#             niż w int8, a to znaczy mniej pomyłek na niewyraźnych fragmentach.
+#
+# Krótko: int8 to "mniej dokładnie, ale znośnie szybko na CPU",
+# a float16 to "dokładniej i znacznie szybciej, ale wymaga GPU".
+#
+# Skoro liczymy na procesorze, musi być int8 — float16 na CPU jest emulowany
+# programowo i byłby dramatycznie wolny.
 COMPUTE_TYPE = "int8"
+
+
+# --- ZAKOMENTOWANY KOD POD GPU (do ewentualnego powrotu) ---------------------
+#
+# Poniższy blok był próbą wskazania Pythonowi, gdzie leżą biblioteki CUDA,
+# gdy CTranslate2 zgłaszał "cublas64_12.dll is not found". NIE zadziałał
+# i przy pracy na CPU jest niepotrzebny — zostaje jako punkt wyjścia,
+# gdyby kiedyś wracać do tematu.
+#
+# Uwaga na przyszłość: os.add_dll_directory() działa tylko wtedy, gdy zostanie
+# wywołane PRZED pierwszym importem ctranslate2/faster_whisper. Po imporcie
+# biblioteka ma już wczytane DLL-e i dokładanie ścieżek niczego nie zmienia.
+# Dlatego ten blok musiałby stać na samej górze pliku, nad importami.
+#
+# import os, sys
+# _SCIEZKI_CUDA = [
+#     os.path.join(sys.prefix, "Lib", "site-packages", "nvidia", "cublas", "bin"),
+#     os.path.join(sys.prefix, "Lib", "site-packages", "nvidia", "cudnn", "bin"),
+#     r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin",
+# ]
+# for _sciezka in _SCIEZKI_CUDA:
+#     if os.path.isdir(_sciezka):
+#         os.add_dll_directory(_sciezka)
+# -----------------------------------------------------------------------------
 
 # Whisper pracuje na 16 kHz i openWakeWord też — dlatego jeden strumień obsługuje oba.
 SAMPLE_RATE = 16000
@@ -153,18 +228,88 @@ def _utworz_detektor():
     return detektor
 
 
+# Fragmenty komunikatów błędów, po których poznajemy problem ze środowiskiem
+# CUDA. Sprawdzamy je, żeby zamiast surowego stack trace'u pokazać wskazówkę,
+# co konkretnie jest nie tak.
+SLOWA_KLUCZE_CUDA = ("cuda", "cudnn", "cublas", "cudart", "gpu", "nvidia", "device")
+
+
+def _komunikat_bledu_gpu(blad):
+    """
+    Tłumaczy błąd inicjalizacji modelu na wskazówkę dla człowieka.
+
+    Rozróżniamy dwa najczęstsze przypadki, bo prowadzą do zupełnie różnych
+    rozwiązań: brak bibliotek CUDA to problem instalacyjny, a brak pamięci
+    na karcie to problem z doborem modelu.
+    """
+    tresc = str(blad).lower()
+
+    # Brak pamięci ma inne rozwiązanie niż brak bibliotek — nie ma sensu
+    # wysyłać po sterowniki kogoś, komu po prostu nie zmieścił się model.
+    if "out of memory" in tresc or "cuda_error_out_of_memory" in tresc:
+        return (
+            f"Za mało pamięci na karcie graficznej dla modelu '{MODEL_WHISPER}'.\n"
+            "  Co zrobić (od najprostszego):\n"
+            "   1. Zamknij gry, przeglądarkę i inne programy obciążające GPU.\n"
+            "   2. Zmień MODEL_WHISPER na 'small' w wake_word_listener.py.\n"
+            "   3. Albo wróć na procesor: URZADZENIE = 'cpu', COMPUTE_TYPE = 'int8'."
+        )
+
+    if any(slowo in tresc for slowo in SLOWA_KLUCZE_CUDA):
+        return (
+            "Nie udało się uruchomić Whispera na karcie graficznej.\n"
+            "  Najczęstsza przyczyna to brakujące biblioteki CUDA/cuDNN,\n"
+            "  których wymaga CTranslate2 (silnik pod spodem faster-whisper).\n"
+            "  Co zrobić:\n"
+            "   1. Sprawdź, czy karta jest widoczna: uruchom 'nvidia-smi' w konsoli.\n"
+            "   2. Doinstaluj biblioteki CUDA 12 i cuDNN 9:\n"
+            "      pip install nvidia-cublas-cu12 nvidia-cudnn-cu12\n"
+            "   3. Zaktualizuj sterownik NVIDIA, jeśli masz starszy niż 525.\n"
+            "   4. Jeśli nie chcesz walczyć z GPU, wróć na procesor:\n"
+            "      URZADZENIE = 'cpu' oraz COMPUTE_TYPE = 'int8'.\n"
+            f"  Oryginalny błąd: {blad}"
+        )
+
+    return f"Nie udało się wczytać modelu Whisper '{MODEL_WHISPER}': {blad}"
+
+
 def _wczytaj_model_whisper():
     """
     Wczytuje model faster-whisper do pamięci.
 
-    Przy pierwszym uruchomieniu model (~500 MB dla "small") pobierze się z internetu.
+    Przy pierwszym uruchomieniu model (~1,5 GB dla "medium") pobierze się z internetu.
+
+    Gdy inicjalizacja na GPU zawiedzie, zamiast surowego stack trace'u
+    wypisujemy wskazówkę, co zrobić. Program i tak się zatrzymuje —
+    świadomie NIE przełączamy po cichu na procesor, bo Jarvis działa w tle
+    i taka podmiana byłaby niewidoczna: zastanawiałbyś się tygodniami,
+    czemu rozpoznawanie trwa dziesięć razy dłużej, niż powinno.
 
     Zwraca: obiekt WhisperModel.
     """
-    logger.info("Wczytuję model Whisper '%s' (przy pierwszym razie może się pobierać)...",
-                MODEL_WHISPER)
-    model = WhisperModel(MODEL_WHISPER, device="cpu", compute_type=COMPUTE_TYPE)
-    logger.info("Model Whisper gotowy.")
+    logger.info("Wczytuję model Whisper '%s' na %s (%s)...",
+                MODEL_WHISPER, URZADZENIE.upper(), COMPUTE_TYPE)
+
+    try:
+        model = WhisperModel(MODEL_WHISPER, device=URZADZENIE, compute_type=COMPUTE_TYPE)
+    except Exception as e:
+        komunikat = _komunikat_bledu_gpu(e)
+        # Każdą linię osobno, żeby w dzienniku zachowały format i wcięcia.
+        for linia in komunikat.split("\n"):
+            logger.error(linia)
+        # "from None" ucina łańcuch wyjątków, więc w konsoli widać czytelną
+        # wskazówkę zamiast ściany wewnętrznych wywołań CTranslate2.
+        # Pełna treść oryginalnego błędu jest już w dzienniku powyżej.
+        raise RuntimeError(komunikat) from None
+
+    # Jednoznaczna informacja o trybie pracy. Jarvis chodzi w tle bez konsoli,
+    # więc bez tej linii nie miałbyś jak sprawdzić, czy liczy na procesorze
+    # czy na karcie — a to różnica rzędu wielkości w czasie odpowiedzi.
+    if URZADZENIE == "cpu":
+        logger.info("Whisper działa na CPU (model: %s, %s)", MODEL_WHISPER, COMPUTE_TYPE)
+    else:
+        logger.info("Whisper działa na GPU (model: %s, %s)", MODEL_WHISPER, COMPUTE_TYPE)
+
     return model
 
 
@@ -313,6 +458,175 @@ def sluchaj_komendy(callback_stanu=None):
         logger.info("[TEKST] Nic nie usłyszałem.")
 
     return tekst
+
+
+# --- Nasłuch rozmowy (bez wake worda) -----------------------------------------
+
+# Próg, powyżej którego VAD uznaje ramkę za mowę (0.0-1.0).
+# Pomiar na nagraniu testowym: cisza dawała 0.04, mowa dochodziła do 1.00,
+# więc 0.5 leży w bardzo szerokiej dolinie między jednym a drugim.
+PROG_VAD = 0.5
+
+# Ile ciszy kończy wypowiedź. Uwaga: to NIE może być zbyt mało — w środku
+# normalnego zdania są naturalne pauzy. W pomiarze na zdaniu testowym pauza
+# między członami trwała ok. 0.25 s, więc 1.2 s daje spory zapas i nie utnie
+# Ci wypowiedzi w połowie, gdy zawahasz się nad słowem.
+CISZA_KONCZACA_S = 1.2
+
+# Bezpiecznik na wypadek, gdyby VAD zaciął się na "ciągle mowa" (np. przy
+# głośnym telewizorze w tle) — po tylu sekundach kończymy nagranie tak czy owak.
+MAX_WYPOWIEDZ_S = 20
+
+# Ile dźwięku SPRZED wykrycia mowy dokładamy do nagrania. VAD potrzebuje
+# ułamka sekundy, żeby się zorientować, więc bez tego bufora pierwsza głoska
+# regularnie ginęła. Trzymamy stale ostatnie pół sekundy i doklejamy je z przodu.
+PRE_BUFOR_S = 0.5
+
+# VAD analizuje ramki po 640 próbek (40 ms). Nasza ramka z mikrofonu ma 1280,
+# czyli dokładnie dwie takie — a to warunek konieczny, bo predict() wymaga
+# długości będącej wielokrotnością frame_size.
+RAMKA_VAD = 640
+
+_vad = None
+
+
+def _przygotuj_vad():
+    """
+    Tworzy detektor mowy (Silero VAD) przy pierwszym użyciu.
+
+    Model przyszedł razem z openWakeWord — download_models() pobiera go
+    zawsze, niezależnie od wybranego słowa-klucza. Nie ma więc nic
+    do doinstalowania ani do pobrania.
+    """
+    global _vad
+
+    if _vad is None:
+        from openwakeword.vad import VAD
+
+        _vad = VAD()
+        logger.info("Detektor mowy (VAD) gotowy.")
+
+    return _vad
+
+
+def sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
+    """
+    Nasłuchuje BEZ wymagania "Hey Jarvis" — to tryb trwającej rozmowy.
+
+    orb_callback  — funkcja przyjmująca nazwę stanu (jak w sluchaj_komendy)
+    limit_ciszy_s — ile czekamy na to, aż zaczniesz mówić, zanim uznamy
+                    rozmowę za skończoną
+
+    Różnica wobec sluchaj_komendy() jest dwojaka:
+
+      1. Nie ma wake worda — mikrofon jest "otwarty" od razu, bo rozmowa
+         już trwa i powtarzanie "Hey Jarvis" przy każdym zdaniu byłoby męczące.
+      2. Długość nagrania nie jest sztywna. Nagrywamy, dopóki mówisz,
+         i kończymy po CISZA_KONCZACA_S ciszy. Przy rozmowie zdania mają
+         różną długość — sztywne 5 sekund albo ucinałoby dłuższe pytania,
+         albo kazałoby czekać po krótkich.
+
+    Świadomie NIE zgłaszamy tu stanu "idle" na czas czekania. Stan sprzed
+    wywołania (np. czerwony błysk po nieudanej komendzie) ma zdążyć się pokazać
+    — gui.py sam wróci z niego do idle po chwili.
+
+    Zwraca: rozpoznany tekst, albo None gdy przez limit_ciszy_s nikt się nie
+    odezwał (koniec sesji rozmowy) lub gdy program jest zamykany.
+    """
+
+    def zglos(stan):
+        if orb_callback is not None:
+            orb_callback(stan)
+
+    _przygotuj()
+    vad = _przygotuj_vad()
+
+    # Stan VAD-a jest ciągły między wywołaniami (to sieć rekurencyjna),
+    # więc przed każdą nową wypowiedzią zaczynamy od czystego licznika.
+    vad.reset_states()
+    _oproznij_bufor()
+
+    logger.info("[ROZMOWA] Słucham dalej, bez wake worda (max %s s ciszy)...", limit_ciszy_s)
+
+    ramek_na_sekunde = SAMPLE_RATE / DLUGOSC_RAMKI
+    limit_czekania = int(limit_ciszy_s * ramek_na_sekunde)
+    limit_ciszy_konczacej = int(CISZA_KONCZACA_S * ramek_na_sekunde)
+    limit_nagrania = int(MAX_WYPOWIEDZ_S * ramek_na_sekunde)
+    dlugosc_pre_bufora = max(1, int(PRE_BUFOR_S * ramek_na_sekunde))
+
+    from collections import deque
+    pre_bufor = deque(maxlen=dlugosc_pre_bufora)
+
+    porcje = []
+    mowa_trwa = False
+    ramek_ciszy = 0
+    ramek_czekania = 0
+
+    while not _zatrzymaj_sie.is_set():
+        dane, _ = _stream.read(DLUGOSC_RAMKI)
+        pcm = dane.flatten()
+
+        wynik = float(vad.predict(pcm, frame_size=RAMKA_VAD))
+        jest_mowa = wynik > PROG_VAD
+
+        if not mowa_trwa:
+            # Faza 1: czekamy, aż ktoś się odezwie.
+            pre_bufor.append(pcm)
+
+            if jest_mowa:
+                mowa_trwa = True
+                ramek_ciszy = 0
+                # Doklejamy bufor sprzed wykrycia, żeby nie zgubić pierwszej głoski.
+                porcje = list(pre_bufor)
+                zglos("listening")
+                logger.info("[ROZMOWA] Słyszę mowę, nagrywam...")
+                continue
+
+            ramek_czekania += 1
+            if ramek_czekania >= limit_czekania:
+                logger.info("[ROZMOWA] Cisza przez %s s — kończę sesję rozmowy.",
+                            limit_ciszy_s)
+                return None
+            continue
+
+        # Faza 2: nagrywamy, aż zapadnie cisza.
+        porcje.append(pcm)
+
+        if jest_mowa:
+            ramek_ciszy = 0
+        else:
+            ramek_ciszy += 1
+            if ramek_ciszy >= limit_ciszy_konczacej:
+                break
+
+        if len(porcje) >= limit_nagrania:
+            logger.warning("[ROZMOWA] Wypowiedź dłuższa niż %s s — ucinam.",
+                           MAX_WYPOWIEDZ_S)
+            break
+
+    if _zatrzymaj_sie.is_set():
+        return None
+
+    if not porcje:
+        return None
+
+    zglos("processing")
+
+    audio = np.concatenate(porcje).astype(np.float32) / 32768.0
+    logger.info("[ROZMOWA] Nagrałem %.1f s, rozpoznaję...", len(audio) / SAMPLE_RATE)
+
+    tekst, jezyk, pewnosc = _rozpoznaj_mowe(audio)
+    _oproznij_bufor()
+
+    if tekst:
+        logger.info("[ROZMOWA] (%s, %.0f%%) %s", jezyk, pewnosc * 100, tekst)
+        return tekst
+
+    # VAD usłyszał dźwięk, ale Whisper nie wydobył z niego słów — to najczęściej
+    # kaszlnięcie, trzaśnięcie drzwiami albo muzyka w tle. Traktujemy to jak ciszę,
+    # czyli koniec rozmowy, zamiast zawracać głowę pustą odpowiedzią.
+    logger.info("[ROZMOWA] Dźwięk bez rozpoznanych słów — kończę sesję.")
+    return None
 
 
 def zamknij():

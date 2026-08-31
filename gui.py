@@ -93,6 +93,18 @@ STANY = {
         "jasnosc": 0.95,
         "pierscien": True,
     },
+    # Jarvis mówi. Fiolet celowo — najbardziej odległy od cyjanu (czekam/słucham),
+    # pomarańczu (myślę) i czerwieni (błąd), więc jednym rzutem oka wiadomo,
+    # że teraz Twoja kolej jest wstrzymana, bo to on ma głos.
+    # Szeroki zakres pulsu (0.55-0.88) daje wrażenie mówienia, a nie oddychania.
+    "speaking": {
+        "kolor": (170, 110, 255),
+        "tempo": 6.0,
+        "min": 0.55,
+        "max": 0.88,
+        "jasnosc": 1.0,
+        "pierscien": False,
+    },
     "error": {
         "kolor": (255, 40, 40),
         "tempo": 9.0,
