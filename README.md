@@ -13,6 +13,8 @@ Asystent głosowy sterowany komendami mowy, inspirowany Jarvisem z filmów o Iro
 - 🧠 **Rozumienie intencji** — analiza komend przez Claude API
 - 🎵 **Sterowanie Spotify** — wyszukiwanie i odtwarzanie utworów przez Spotify Web API
 - 🚀 **Uruchamianie i zamykanie aplikacji** — na podstawie komend głosowych
+- 🌐 **Strony w Operze GX** — otwieranie stron i wyszukiwanie fraz (Google, YouTube i inne serwisy)
+- 🔊 **Sterowanie komputerem** — głośność, jasność ekranu, blokada, uśpienie, restart i wyłączenie (restart i wyłączenie po potwierdzeniu głosem)
 - 🔍 **Automatyczne wykrywanie zainstalowanych programów** — przeszukuje Menu Start i zapamiętuje lokalizacje
 - 💫 **Wizualny interfejs** — pulsujące, świecące okienko reagujące na stan asystenta (nasłuchuje / przetwarza / błąd)
 - 📌 **Działanie w tle** — ikona w zasobniku systemowym
@@ -77,6 +79,11 @@ Powiedz **"Hey Jarvis"**, a następnie komendę, np.:
 - *"Puść piosenkę Bohemian Rhapsody"*
 - *"Otwórz Chrome"*
 - *"Zamknij Spotify"*
+- *"Odpal Operę GX i włącz mi Gmaila"*
+- *"Wpisz w operze przepis na pizzę"*
+- *"Przycisz do trzydziestu procent"*
+- *"Ustaw jasność na sześćdziesiąt"*
+- *"Zablokuj ekran"*
 
 ## ⚠️ Znane ograniczenia
 

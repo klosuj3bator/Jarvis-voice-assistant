@@ -16,13 +16,20 @@ nie wymaga konta, klucza API ani sieci (poza jednorazowym pobraniem modeli).
 
 import atexit
 import logging
+import os
 import threading
+import time
 
 import numpy as np
 import sounddevice as sd
-from faster_whisper import WhisperModel
-from openwakeword.model import Model as WakeWordModel
-from openwakeword.utils import download_models
+
+# faster_whisper i openwakeword są importowane LENIWIE, w funkcjach poniżej.
+#
+# Powód jest mierzalny: na zimnym starcie (po restarcie komputera) sam
+# `import openwakeword` trwa ok. 16 sekund, bo pociąga za sobą scikit-learn —
+# a ten przychodzi wyłącznie przez moduł do trenowania własnych słów-kluczy,
+# którego w ogóle nie używamy. Import na górze pliku oznaczałby, że te
+# kilkanaście sekund mija, zanim cokolwiek pojawi się na ekranie.
 
 # Logger nazwany jak moduł — w jarvis.log widać wtedy, że linia przyszła stąd.
 # Konfiguracją (dokąd zapisywać) zajmuje się main.py, nie ten plik.
@@ -101,6 +108,23 @@ URZADZENIE = "cpu"
 # programowo i byłby dramatycznie wolny.
 COMPUTE_TYPE = "int8"
 
+# Ile rdzeni procesora wolno Whisperowi zająć podczas rozpoznawania mowy.
+#
+# Domyślnie bierze 4 — i to on odpowiadał za skoki obciążenia do 80-90%:
+# przez kilka sekund po każdej wypowiedzi zajmował jedną trzecią procesora.
+# Zmierzone (5-sekundowe nagranie, model small, 12 wątków logicznych):
+#
+#     wątki   czas    obciążenie całego CPU
+#       1     9,8 s          8%
+#       2     5,8 s         17%
+#       3     4,9 s         25%     <- ustawione
+#       4     5,1 s         33%     (domyślne)
+#
+# Trzy wątki są tak samo szybkie jak cztery — przy tak krótkim nagraniu
+# Whisper nie umie wykorzystać czwartego rdzenia — a biorą o ćwierć mniej.
+# Ustaw 2, jeśli wolisz o połowę mniejsze obciążenie kosztem ~1 s czekania.
+WATKI_WHISPERA = 3
+
 
 # --- ZAKOMENTOWANY KOD POD GPU (do ewentualnego powrotu) ---------------------
 #
@@ -124,6 +148,22 @@ COMPUTE_TYPE = "int8"
 #     if os.path.isdir(_sciezka):
 #         os.add_dll_directory(_sciezka)
 # -----------------------------------------------------------------------------
+
+# Język, w którym mówisz do Jarvisa.
+#
+# To NAJWAŻNIEJSZE ustawienie dla szybkości — wymuszenie języka skraca
+# rozpoznawanie mniej więcej o połowę, bo Whisper nie musi go najpierw zgadywać.
+#
+# Cena: całe zdania po angielsku wychodzą przekręcone. Zmierzone:
+#     "Play the album Dark Side of the Moon"
+#       z language="pl"     -> "Plaję album Dark Side of the Moon"
+#       z autowykrywaniem   -> "Play the album Dark Side of the Moon"
+#
+# Angielskie TYTUŁY wplecione w polskie zdanie przechodzą bez szwanku
+# ("włącz album The Grind Deluxe" działa), więc przy polskiej rozmowie
+# to dobry interes. Ustaw None, jeśli chcesz mówić do Jarvisa także
+# całymi zdaniami po angielsku — kosztem dwukrotnie dłuższego czekania.
+JEZYK = "pl"
 
 # Whisper pracuje na 16 kHz i openWakeWord też — dlatego jeden strumień obsługuje oba.
 SAMPLE_RATE = 16000
@@ -169,36 +209,203 @@ def czy_zatrzymano():
     return _zatrzymaj_sie.is_set()
 
 
-def _przygotuj():
+# Co ile sekund szukamy mikrofonu, gdy go nie ma.
+CO_ILE_SZUKAC_MIKROFONU_S = 3
+
+_zarejestrowano_atexit = False
+
+
+def _przygotuj(callback_stanu=None):
     """
-    Leniwa inicjalizacja: przy pierwszym wywołaniu tworzy detektor, model i strumień.
-    Przy kolejnych nie robi nic.
+    Leniwa inicjalizacja: tworzy detektor, model i strumień mikrofonu —
+    każde z nich dopiero wtedy, gdy go jeszcze nie ma.
 
     Dzięki temu main.py nie musi pamiętać o żadnym "setupie" — po prostu woła
-    sluchaj_komendy(), a moduł sam się przygotowuje, kiedy jest pierwszy raz potrzebny.
+    sluchaj_komendy(), a moduł sam się przygotowuje, kiedy jest potrzebny.
+
+    Każdą z trzech rzeczy sprawdzamy OSOBNO, bo mikrofon może zniknąć
+    w trakcie pracy (rozładowane słuchawki), a wtedy trzeba otworzyć go
+    na nowo — bez ponownego, kilkusekundowego wczytywania modeli.
     """
-    global _detektor, _model_whisper, _stream
+    global _detektor, _model_whisper, _zarejestrowano_atexit
 
-    if _stream is not None:
-        return
-
-    _detektor = _utworz_detektor()
-    _model_whisper = _wczytaj_model_whisper()
-
-    # dtype="int16", bo tego formatu oczekuje openWakeWord.
-    # blocksize = DLUGOSC_RAMKI daje najniższe opóźnienie przy wykrywaniu słowa.
-    _stream = sd.InputStream(
-        samplerate=SAMPLE_RATE,
-        channels=1,
-        dtype="int16",
-        blocksize=DLUGOSC_RAMKI,
-    )
-    _stream.start()
-    logger.info("Mikrofon otwarty: %s", sd.query_devices(kind="input")["name"])
+    if _detektor is None:
+        _detektor = _utworz_detektor()
+    if _model_whisper is None:
+        _model_whisper = _wczytaj_model_whisper()
+    if _stream is None:
+        _otworz_mikrofon(callback_stanu)
 
     # Strumień żyje przez cały czas działania programu, więc nie ma tu bloku `with`.
     # atexit gwarantuje, że mikrofon zostanie zwolniony przy wyjściu — także po Ctrl+C.
-    atexit.register(zamknij)
+    if not _zarejestrowano_atexit:
+        atexit.register(zamknij)
+        _zarejestrowano_atexit = True
+
+
+def _otworz_mikrofon(callback_stanu=None):
+    """
+    Otwiera strumień mikrofonu, a jeśli mikrofonu nie ma — CZEKA, aż się pojawi.
+
+
+    SKĄD TA FUNKCJA
+    ===============
+    Wcześniej brak mikrofonu przy starcie kończył się wyjątkiem, który zabijał
+    wątek nasłuchu na zawsze. Okno dalej się animowało, więc wyglądało na to,
+    że Jarvis słucha — a był kompletnie głuchy. W dzienniku wyglądało to tak:
+
+        22:29:16  Whisper działa na CPU
+        22:29:16  PortAudioError: Error querying device -1
+
+    Przyczyna była prozaiczna: słuchawki bezprzewodowe (JBL Quantum 360)
+    łączą się kilka sekund po starcie systemu, a Jarvis był szybszy.
+
+    Teraz: brak mikrofonu to stan przejściowy, nie awaria. Pokazujemy go
+    w HUD-zie i co kilka sekund próbujemy ponownie.
+
+
+    DLACZEGO PONOWNA INICJALIZACJA PORTAUDIO
+    ========================================
+    Samo ponawianie prób nic by nie dało. Biblioteka PortAudio, na której stoi
+    sounddevice, odczytuje listę urządzeń audio RAZ, przy starcie programu,
+    i potem korzysta z tej zapamiętanej listy. Słuchawki sparowane później
+    po prostu by na niej nie istniały — próbowalibyśmy w nieskończoność.
+    Dlatego przed każdą kolejną próbą każemy PortAudio odczytać listę od nowa.
+
+    Zwraca: True, gdy mikrofon otwarty; False, gdy program jest zamykany.
+    """
+    global _stream
+
+    zgloszono_brak = False
+
+    while not _zatrzymaj_sie.is_set():
+        try:
+            # dtype="int16", bo tego formatu oczekuje openWakeWord.
+            # blocksize = DLUGOSC_RAMKI daje najniższe opóźnienie przy wykrywaniu słowa.
+            strumien = sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="int16",
+                blocksize=DLUGOSC_RAMKI,
+            )
+            strumien.start()
+        except sd.PortAudioError as e:
+            # Zgłaszamy tylko pierwszy raz — bez tego dziennik zapełniałby się
+            # tym samym ostrzeżeniem co trzy sekundy.
+            if not zgloszono_brak:
+                logger.warning("Nie widzę mikrofonu (%s). Czekam, aż się pojawi...", e)
+                if callback_stanu is not None:
+                    callback_stanu("no_mic")
+                zgloszono_brak = True
+
+            # Czekamy małymi krokami, żeby zamknięcie programu nie musiało
+            # czekać na koniec całej przerwy.
+            for _ in range(int(CO_ILE_SZUKAC_MIKROFONU_S * 10)):
+                if _zatrzymaj_sie.is_set():
+                    return False
+                time.sleep(0.1)
+
+            try:
+                sd._terminate()
+                sd._initialize()
+            except Exception:
+                logger.debug("Nie udało się odświeżyć listy urządzeń audio", exc_info=True)
+            continue
+
+        _stream = strumien
+        logger.info("Mikrofon otwarty: %s", sd.query_devices(kind="input")["name"])
+
+        if zgloszono_brak and callback_stanu is not None:
+            logger.info("Mikrofon się pojawił — wracam do nasłuchu.")
+            callback_stanu("idle")
+        return True
+
+    return False
+
+
+def _mikrofon_utracony(blad):
+    """
+    Sprząta po mikrofonie, który zniknął w trakcie pracy — np. słuchawki
+    się rozładowały albo wyszły poza zasięg.
+
+    Zamykamy martwy strumień i zerujemy go. Następne wywołanie _przygotuj()
+    zobaczy, że mikrofonu brak, i zacznie go szukać — z komunikatem w HUD-zie.
+    """
+    global _stream
+
+    logger.warning("Utracono mikrofon (%s) — zacznę go szukać od nowa.", blad)
+    try:
+        if _stream is not None:
+            _stream.close()
+    except Exception:
+        pass
+    _stream = None
+
+
+def _odetnij_scikit_learn():
+    """
+    Powstrzymuje openWakeWord przed wciągnięciem scikit-learn.
+
+    NA CZYM TO POLEGA
+    =================
+    Plik openwakeword/__init__.py robi między innymi to:
+
+        from openwakeword.custom_verifier_model import train_custom_verifier
+
+    Ten moduł służy do TRENOWANIA własnych słów-kluczy i jako jedyny w całej
+    bibliotece potrzebuje scikit-learn. My używamy wyłącznie gotowego modelu
+    "hey_jarvis", więc nigdy go nie wołamy — a mimo to płacilibyśmy za niego
+    ok. 13 sekund przy każdym zimnym starcie.
+
+    Podstawiamy więc pod tę nazwę pustą atrapę, ZANIM openWakeWord zdąży
+    zaimportować oryginał. Python sprawdza sys.modules przed sięgnięciem
+    na dysk, więc widzi naszą atrapę i nie rusza scikit-learn.
+
+    CZY TO BEZPIECZNE
+    =================
+    Sprawdziłem, że po takiej podmianie Model.predict() i VAD działają
+    normalnie — one nie korzystają ze scikit-learn.
+
+    Gdyby przyszła wersja openWakeWord zmieniła układ modułów, ten kod
+    NIE zepsuje się po cichu: import wywali się głośnym błędem przy starcie.
+    Żeby wrócić do zachowania domyślnego, wystarczy przestać wołać tę funkcję —
+    kosztem kilkunastu sekund przy uruchamianiu.
+    """
+    import sys
+    import types
+
+    if "openwakeword.custom_verifier_model" in sys.modules:
+        return
+
+    atrapa = types.ModuleType("openwakeword.custom_verifier_model")
+    # Nazwa musi istnieć, bo __init__.py ją stamtąd importuje.
+    atrapa.train_custom_verifier = None
+    sys.modules["openwakeword.custom_verifier_model"] = atrapa
+
+
+def _brakuje_modeli():
+    """
+    Sprawdza, czy komplet plików openWakeWord leży już na dysku.
+
+    Modele mieszkają w katalogu zainstalowanej biblioteki. Pytamy o nie
+    bezpośrednio, zamiast ufać, że download_models() zrobi to tanio.
+
+    Zwraca: True, jeśli czegokolwiek brakuje (czyli trzeba pobierać).
+    """
+    _odetnij_scikit_learn()
+
+    import openwakeword
+
+    katalog = os.path.join(os.path.dirname(openwakeword.__file__), "resources", "models")
+
+    wymagane = [
+        f"{MODEL_WAKE_WORD}_v0.1.onnx",
+        "melspectrogram.onnx",
+        "embedding_model.onnx",
+        "silero_vad.onnx",
+    ]
+
+    return any(not os.path.exists(os.path.join(katalog, p)) for p in wymagane)
 
 
 def _utworz_detektor():
@@ -210,11 +417,25 @@ def _utworz_detektor():
 
     Zwraca: obiekt Model gotowy do wywołania .predict().
     """
+    _odetnij_scikit_learn()
+
+    from openwakeword.model import Model as WakeWordModel
+
     logger.info("Przygotowuję detektor wake worda '%s'...", MODEL_WAKE_WORD)
 
-    # Pobiera wskazany model + modele pomocnicze (melspectrogram, embedding, VAD).
-    # Funkcja sama sprawdza, czy pliki już są — przy kolejnych startach nic nie robi.
-    download_models(model_names=[MODEL_WAKE_WORD])
+    # download_models() pobiera model + pliki pomocnicze (melspectrogram,
+    # embedding, VAD). Wołamy ją TYLKO wtedy, gdy czegoś brakuje.
+    #
+    # Zmierzone: nawet przy komplecie plików funkcja traci 2,6 s na odpytywanie
+    # sieci. Po restarcie komputera bywa gorzej, bo karta sieciowa może jeszcze
+    # nie mieć połączenia i zapytanie czeka na timeout.
+    if _brakuje_modeli():
+        logger.info("Brakuje plików modeli — pobieram (jednorazowo)...")
+        from openwakeword.utils import download_models
+
+        download_models(model_names=[MODEL_WAKE_WORD])
+    else:
+        logger.info("Pliki modeli są na miejscu — pomijam sprawdzanie sieci.")
 
     # inference_framework="onnx" jest tu KONIECZNE.
     # Domyślną wartością biblioteki jest "tflite", ale tflite-runtime nie ma
@@ -287,11 +508,35 @@ def _wczytaj_model_whisper():
 
     Zwraca: obiekt WhisperModel.
     """
+    from faster_whisper import WhisperModel
+
     logger.info("Wczytuję model Whisper '%s' na %s (%s)...",
                 MODEL_WHISPER, URZADZENIE.upper(), COMPUTE_TYPE)
 
     try:
-        model = WhisperModel(MODEL_WHISPER, device=URZADZENIE, compute_type=COMPUTE_TYPE)
+        # local_files_only=True mówi: "bierz z dysku, nie pytaj internetu".
+        #
+        # Bez tego faster-whisper przy każdym starcie odpytuje Hugging Face,
+        # czy nie ma nowszej wersji modelu. Zmierzone: 3,7 s z tym sprawdzeniem,
+        # 1,4 s bez niego. Po restarcie komputera bywa znacznie gorzej —
+        # jeśli sieć jeszcze nie wstała, zapytanie czeka na timeout,
+        # a Jarvis stoi bezczynnie.
+        try:
+            model = WhisperModel(
+                MODEL_WHISPER,
+                device=URZADZENIE,
+                compute_type=COMPUTE_TYPE,
+                cpu_threads=WATKI_WHISPERA,
+                local_files_only=True,
+            )
+        except Exception:
+            # Modelu nie ma jeszcze na dysku — to normalne przy pierwszym
+            # uruchomieniu po instalacji. Wtedy (i tylko wtedy) sięgamy do sieci.
+            logger.info("Modelu nie ma w cache — pobieram z internetu (jednorazowo)...")
+            model = WhisperModel(
+                MODEL_WHISPER, device=URZADZENIE, compute_type=COMPUTE_TYPE,
+                cpu_threads=WATKI_WHISPERA,
+            )
     except Exception as e:
         komunikat = _komunikat_bledu_gpu(e)
         # Każdą linię osobno, żeby w dzienniku zachowały format i wcięcia.
@@ -376,14 +621,41 @@ def _rozpoznaj_mowe(audio):
     """
     Zamienia nagranie na tekst.
 
-    Nie wymuszamy języka — Whisper sam wykrywa, czy mówisz po polsku czy angielsku.
-    (Gdybyś chciał zablokować na polski, dopisz language="pl" w wywołaniu poniżej.)
-
     Zwraca: (tekst, kod_języka, pewność_języka).
     """
     # vad_filter odsiewa fragmenty ciszy — dzięki temu Whisper nie "zmyśla"
     # słów tam, gdzie nic nie powiedziałeś (częsty problem przy stałym czasie nagrania).
-    segmenty, info = _model_whisper.transcribe(audio, beam_size=5, vad_filter=True)
+    #
+    # Pozostałe parametry to wyciskanie czasu. Zmierzone na 5-sekundowych
+    # nagraniach (small, CPU, int8), średnia z trzech zdań:
+    #
+    #     bez nich                      10,0 s
+    #     bez znaczników czasu           9,6 s
+    #     + bez kontekstu, temp. stała   9,5 s
+    #     + WYMUSZONY JĘZYK              4,9 s   <- tu jest cały zysk
+    #
+    # Reszta to drobiazgi, ale JEZYK zmienia wszystko: bez niego Whisper
+    # najpierw uruchamia osobne rozpoznawanie języka, a dopiero potem
+    # transkrybuje. To dosłownie podwaja pracę przy krótkiej komendzie.
+    #
+    # beam_size zostaje 5 — przy wymuszonym języku różnica między 1 a 5
+    # mieści się w błędzie pomiaru, więc nie ma po co oddawać dokładności.
+    segmenty, info = _model_whisper.transcribe(
+        audio,
+        beam_size=5,
+        vad_filter=True,
+        language=JEZYK,
+        # Znaczniki czasu to dodatkowe tokeny do wygenerowania, a my i tak
+        # bierzemy sam tekst.
+        without_timestamps=True,
+        # Bez tego Whisper doklejał do zapytania własną poprzednią transkrypcję
+        # "dla kontekstu". Przy osobnych komendach to tylko zaszumia wynik.
+        condition_on_previous_text=False,
+        # Domyślnie po nieudanej próbie Whisper powtarza dekodowanie z wyższą
+        # temperaturą. Przy krótkich komendach te powtórki kosztują więcej,
+        # niż dają.
+        temperature=0.0,
+    )
 
     # transcribe() zwraca generator — tekst powstaje dopiero tutaj, przy łączeniu segmentów.
     tekst = " ".join(segment.text.strip() for segment in segmenty).strip()
@@ -428,29 +700,36 @@ def sluchaj_komendy(callback_stanu=None):
         if callback_stanu is not None:
             callback_stanu(stan)
 
-    _przygotuj()
+    _przygotuj(callback_stanu)
 
-    # Uwaga: NIE zgłaszamy tu "idle". Czekanie na wake word to stan domyślny,
-    # a main.py ustawia go sam po wykonaniu komendy. Gdybyśmy zgłaszali "idle"
-    # na starcie każdego cyklu, skasowalibyśmy czerwony błysk po poprzednim
-    # błędzie — pętla wraca tu w kilka milisekund po jego zapaleniu,
-    # więc praktycznie nigdy nie zdążyłbyś go zobaczyć.
-    if not _czekaj_na_wake_word():
-        return ""  # program jest zamykany
+    # Mikrofon mógł zniknąć w trakcie czekania — wtedy odczyt rzuca wyjątkiem.
+    # Łapiemy go i oddajemy pusty tekst: pętla w main.py zawoła nas ponownie,
+    # a _przygotuj() zobaczy brak strumienia i zacznie szukać mikrofonu.
+    try:
+        # Uwaga: NIE zgłaszamy tu "idle". Czekanie na wake word to stan domyślny,
+        # a main.py ustawia go sam po wykonaniu komendy. Gdybyśmy zgłaszali "idle"
+        # na starcie każdego cyklu, skasowalibyśmy czerwony błysk po poprzednim
+        # błędzie — pętla wraca tu w kilka milisekund po jego zapaleniu,
+        # więc praktycznie nigdy nie zdążyłbyś go zobaczyć.
+        if not _czekaj_na_wake_word():
+            return ""  # program jest zamykany
 
-    logger.info("[WYKRYTO] Usłyszałem 'Hey Jarvis'!")
+        logger.info("[WYKRYTO] Usłyszałem 'Hey Jarvis'!")
 
-    zglos("listening")
-    audio = _nagraj()
+        zglos("listening")
+        audio = _nagraj()
 
-    if audio.size == 0:
-        return ""  # nagrywanie przerwane przez zamykanie programu
+        if audio.size == 0:
+            return ""  # nagrywanie przerwane przez zamykanie programu
 
-    zglos("processing")
-    tekst, jezyk, pewnosc = _rozpoznaj_mowe(audio)
+        zglos("processing")
+        tekst, jezyk, pewnosc = _rozpoznaj_mowe(audio)
 
-    # Czyścimy bufor dopiero teraz, po transkrypcji.
-    _oproznij_bufor()
+        # Czyścimy bufor dopiero teraz, po transkrypcji.
+        _oproznij_bufor()
+    except sd.PortAudioError as e:
+        _mikrofon_utracony(e)
+        return ""
 
     if tekst:
         logger.info("[TEKST] (%s, %.0f%%) %s", jezyk, pewnosc * 100, tekst)
@@ -501,6 +780,8 @@ def _przygotuj_vad():
     global _vad
 
     if _vad is None:
+        _odetnij_scikit_learn()
+
         from openwakeword.vad import VAD
 
         _vad = VAD()
@@ -510,6 +791,24 @@ def _przygotuj_vad():
 
 
 def sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
+    """
+    Nasłuch w trakcie rozmowy, bez "Hey Jarvis". Pełny opis zachowania
+    i zwracanych wartości — przy _sluchaj_bez_wake_worda() poniżej.
+
+    Ta cienka warstwa dokłada jedno: obsługę mikrofonu, który zniknął
+    w trakcie rozmowy (rozładowane słuchawki, wyjście poza zasięg).
+    Wtedy odczyt z mikrofonu rzuca wyjątkiem — zamiast wysypywać cały
+    wątek, kończymy rozmowę, a szukaniem mikrofonu zajmie się _przygotuj()
+    przy następnym czuwaniu.
+    """
+    try:
+        return _sluchaj_bez_wake_worda(orb_callback, limit_ciszy_s)
+    except sd.PortAudioError as e:
+        _mikrofon_utracony(e)
+        return None
+
+
+def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
     """
     Nasłuchuje BEZ wymagania "Hey Jarvis" — to tryb trwającej rozmowy.
 
@@ -530,15 +829,19 @@ def sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
     wywołania (np. czerwony błysk po nieudanej komendzie) ma zdążyć się pokazać
     — gui.py sam wróci z niego do idle po chwili.
 
-    Zwraca: rozpoznany tekst, albo None gdy przez limit_ciszy_s nikt się nie
-    odezwał (koniec sesji rozmowy) lub gdy program jest zamykany.
+    Zwraca jedną z trzech rzeczy i warto je rozróżniać:
+        "jakiś tekst" — usłyszał i rozpoznał wypowiedź
+        ""            — coś było słychać, ale bez słów (kaszlnięcie, hałas);
+                        rozmowa TRWA, po prostu słuchamy dalej
+        None          — cisza przez cały limit_ciszy_s albo zamykanie programu;
+                        to jedyny sygnał "koniec rozmowy"
     """
 
     def zglos(stan):
         if orb_callback is not None:
             orb_callback(stan)
 
-    _przygotuj()
+    _przygotuj(orb_callback)
     vad = _przygotuj_vad()
 
     # Stan VAD-a jest ciągły między wywołaniami (to sieć rekurencyjna),
@@ -623,10 +926,16 @@ def sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
         return tekst
 
     # VAD usłyszał dźwięk, ale Whisper nie wydobył z niego słów — to najczęściej
-    # kaszlnięcie, trzaśnięcie drzwiami albo muzyka w tle. Traktujemy to jak ciszę,
-    # czyli koniec rozmowy, zamiast zawracać głowę pustą odpowiedzią.
-    logger.info("[ROZMOWA] Dźwięk bez rozpoznanych słów — kończę sesję.")
-    return None
+    # kaszlnięcie, trzaśnięcie drzwiami albo muzyka w tle.
+    #
+    # Zwracamy PUSTY STRING, nie None, i ta różnica jest tu istotna:
+    #   None — cisza przez cały limit, czyli "nikogo nie ma, kończymy"
+    #   ""   — coś było słychać, tylko bez słów, czyli "słucham dalej"
+    #
+    # Wcześniej oba przypadki kończyły rozmowę i przez to jedno kichnięcie
+    # odsyłało Jarvisa z powrotem do czekania na "Hey Jarvis".
+    logger.info("[ROZMOWA] Dźwięk bez rozpoznanych słów.")
+    return ""
 
 
 def zamknij():

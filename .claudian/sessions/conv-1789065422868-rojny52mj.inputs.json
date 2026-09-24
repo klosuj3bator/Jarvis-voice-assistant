@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "conversationId": "conv-1789065422868-rojny52mj",
+  "records": [
+    {
+      "schemaVersion": 1,
+      "id": "msg-1789065422920-edgshai",
+      "userTurnOrdinal": 1,
+      "state": "accepted",
+      "localMessageId": "msg-1789065422865-k66quvw",
+      "timestamp": 1789065422865,
+      "rawDisplayText": "cześć działasz?",
+      "canonicalText": "cześć działasz?",
+      "images": [],
+      "contentDigest": "4e982b65ddff218b3ec5cf1f71400d962fe312f72542ae7627170459b1eafc44",
+      "providerUserMessageId": "e466ed75-2359-4a1c-935a-506e0d4e2b98"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "msg-1789065444283-12410lb",
+      "userTurnOrdinal": 2,
+      "state": "accepted",
+      "localMessageId": "msg-1789065444280-h4raaly",
+      "timestamp": 1789065444280,
+      "rawDisplayText": "Hej działasz?",
+      "canonicalText": "Hej działasz?",
+      "images": [],
+      "contentDigest": "dac4a12c93159d31708ef22bc0ce10bdbc13fcd5ef475735b15ead884af9c67e",
+      "providerUserMessageId": "4eddfc8a-f137-4506-8fda-ad612b4a362d"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "msg-1789065554226-y17w3t4",
+      "userTurnOrdinal": 3,
+      "state": "accepted",
+      "localMessageId": "msg-1789065554223-rrc5p7l",
+      "timestamp": 1789065554223,
+      "rawDisplayText": "hej działasz?",
+      "canonicalText": "hej działasz?",
+      "images": [],
+      "contentDigest": "4b3abce6066efb38d0cfb58d57ee3532e68741ea5e4929ffaebfa342496aacd7",
+      "providerUserMessageId": "1d975d7b-1d6e-488c-a41b-92979b4c16e1",
+      "providerAssistantMessageId": "c6c370be-cf2f-4236-86a3-0ea086ee8a1e"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "msg-1789065632367-ur9gtih",
+      "userTurnOrdinal": 4,
+      "state": "accepted",
+      "localMessageId": "msg-1789065632364-qkxdfkv",
+      "timestamp": 1789065632364,
+      "rawDisplayText": "stworz mi zwykły plik tekstowy w którym bedzie napisane Jestem Goat",
+      "canonicalText": "stworz mi zwykły plik tekstowy w którym bedzie napisane Jestem Goat",
+      "images": [],
+      "contentDigest": "16658ea2388871e8e00b2fa45ff56958e82d2f4281cc4f2f0e26a88a6e1c99b7",
+      "providerUserMessageId": "449c7be3-9e4b-4a38-a5ee-ed9208a6fa9c",
+      "providerAssistantMessageId": "8492edeb-d494-42c3-bd02-ea358117ad18"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "msg-1789065667647-t6kjssu",
+      "userTurnOrdinal": 5,
+      "state": "accepted",
+      "localMessageId": "msg-1789065667643-erghya7",
+      "timestamp": 1789065667643,
+      "rawDisplayText": "Teraz stwórz mi kolejny taki plik ale z napisem SERIO JESTEM GOATEM",
+      "canonicalText": "Teraz stwórz mi kolejny taki plik ale z napisem SERIO JESTEM GOATEM",
+      "images": [],
+      "contentDigest": "d249d04a985064d9f210cdadc3859be2c5d74ca86af54fc31e8079ea55bfb342",
+      "providerUserMessageId": "7bc4a722-b46f-4acd-b56e-67bfe9d421db",
+      "providerAssistantMessageId": "29bd3529-aed1-46de-a0ac-f74ffbe7c907"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "msg-1789065678392-iiv47bl",
+      "userTurnOrdinal": 6,
+      "state": "accepted",
+      "localMessageId": "msg-1789065678389-fkac89a",
+      "timestamp": 1789065678389,
+      "rawDisplayText": "połączysz te dwa pliki?",
+      "canonicalText": "połączysz te dwa pliki?",
+      "images": [],
+      "contentDigest": "a30fadb0598d18510fd8d9ddd59f940dc5d1949300a98b7c412099ef82ee938d",
+      "providerUserMessageId": "2007f6e1-6481-4411-bce1-c99b90583a17",
+      "providerAssistantMessageId": "ef2284a4-4f63-49f6-a2ac-ae1ff99fe4da"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "msg-1789065691864-62ey81d",
+      "userTurnOrdinal": 7,
+      "state": "accepted",
+      "localMessageId": "msg-1789065691860-28secju",
+      "timestamp": 1789065691860,
+      "rawDisplayText": "tak",
+      "canonicalText": "tak",
+      "images": [],
+      "contentDigest": "fb28ba5f61fefb06746bd5eaef0acecbf5cfb58bba9eb51187fdfbd21f8feea0",
+      "providerUserMessageId": "99a6a6f4-47ce-4403-a30d-06d86d63429e",
+      "providerAssistantMessageId": "2b23588e-d4a8-4e54-bb89-e493426188e0"
+    }
+  ]
+}

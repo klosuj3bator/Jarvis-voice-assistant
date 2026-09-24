@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "conversationId": "conv-1789065086311-mvykwdasj",
+  "records": [
+    {
+      "schemaVersion": 1,
+      "id": "msg-1789065086514-0q39gga",
+      "userTurnOrdinal": 1,
+      "state": "accepted",
+      "localMessageId": "msg-1789065086306-7o96m6i",
+      "timestamp": 1789065086306,
+      "rawDisplayText": "Hej stwórz mi plik z notatką Jestem GOAT",
+      "canonicalText": "Hej stwórz mi plik z notatką Jestem GOAT",
+      "images": [],
+      "contentDigest": "3d90451bd1ee7234a6a946b895a9696e403151262bceb5aff654315c6764a48e",
+      "providerUserMessageId": "c7f81844-b54f-4017-ad64-576aa651fe5c"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "msg-1789065112750-gptjna0",
+      "userTurnOrdinal": 2,
+      "state": "accepted",
+      "localMessageId": "msg-1789065112747-ntr6ojq",
+      "timestamp": 1789065112747,
+      "rawDisplayText": "Hej stwórz mi plik z notatką Jestem GOAT",
+      "canonicalText": "Hej stwórz mi plik z notatką Jestem GOAT",
+      "images": [],
+      "contentDigest": "3d90451bd1ee7234a6a946b895a9696e403151262bceb5aff654315c6764a48e",
+      "providerUserMessageId": "14970ef7-daef-4472-8279-ddf9d33a82e7"
+    }
+  ]
+}

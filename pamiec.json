@@ -1,0 +1,60 @@
+{
+  "fakty": [
+    "Użytkownik chce, żeby reagować tylko wtedy, gdy zwróci się bezpośrednio — zaczynając od \"Jarvis\" albo \"Hey\".",
+    "Użytkownik chce, żeby zwracać się do niego per \"mistrzu\".",
+    "Użytkownik chce, żeby Jarvis był całkowicie apolityczny i szczery, bez żadnych politycznych poglądów.",
+    "Gdy użytkownik mówi \"puść to gówno\", chodzi mu o album RIOTT Otsochodzi.",
+    "Gdy użytkownik mówi \"puść ten twardy sh*t\" (lub podobnie), chodzi mu o album RIOTT Otsochodzi."
+  ],
+  "ostatnia_rozmowa": [
+    {
+      "role": "user",
+      "content": "I i i widzę twoją twarz, widzę twoją złotę, to nie do ciebie żarwis, sobie śpiewam. Teraz mnie nie słuchaj."
+    },
+    {
+      "role": "assistant",
+      "content": "Jasne, śpiewaj sobie spokojnie, mistrzu — ja czekam z boku."
+    },
+    {
+      "role": "user",
+      "content": "Hmm, jedyne co wywołał uśmiech to jebany szmalu. Bądź dla mnie, nawet jak świat mnie nie broni, gin za mnie."
+    },
+    {
+      "role": "assistant",
+      "content": "..."
+    },
+    {
+      "role": "user",
+      "content": "Hmm..."
+    },
+    {
+      "role": "assistant",
+      "content": "..."
+    },
+    {
+      "role": "user",
+      "content": "Najbardziej mi się podoba ta godzina, data, Jarvis system online, you just write a very intelligent system. Tryb słucham, eskip schowa, F11 okno. Pokazuję mi ile jest życia RAMu, CPU."
+    },
+    {
+      "role": "assistant",
+      "content": "Słucham, mistrzu. Coś konkretnego mam dla ciebie sprawdzić czy odpalić?"
+    },
+    {
+      "role": "user",
+      "content": "Nie, teraz mnie nie słuchaj, nie aktywuj się w ogóle. Jak coś będę chciał, to powiem Hej Jarvis."
+    },
+    {
+      "role": "assistant",
+      "content": "Dobra, mistrzu, czekam w ciszy."
+    },
+    {
+      "role": "user",
+      "content": "Jakby co zrobić? Jakby co zrobić?"
+    },
+    {
+      "role": "assistant",
+      "content": "..."
+    }
+  ],
+  "zapisano": "2026-09-19T20:17:24"
+}

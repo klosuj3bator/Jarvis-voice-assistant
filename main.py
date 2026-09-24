@@ -4,8 +4,10 @@ main.py — punkt wejścia asystenta Jarvis.
 Spina wszystkie moduły w jedną aplikację działającą w tle:
 
     gui (kula + zasobnik)  <-  sygnały o stanie
-    wake_word_listener     ->  router          ->  spotify_controller / app_launcher
-    (uszy: mowa->tekst)        (mózg: co robić)    (ręce: wykonaj)
+    wake_word_listener     ->  agent           ->  narzędzia
+    (uszy: mowa->tekst)        (mózg: rozmowa      (Spotify, aplikacje,
+                                + narzędzia)        wyszukiwarka, pamięć)
+    tts (usta: tekst->mowa)    pamiec (co pamięta między rozmowami)
 
 
 DLACZEGO NASŁUCH DZIAŁA W OSOBNYM WĄTKU
@@ -51,28 +53,103 @@ Uruchomienie w tle, bez konsoli:                     pythonw main.py
 """
 
 import logging
+import re
 import signal
 import sys
 import threading
 
-from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
-import app_launcher
-import chat
 import gui
-import router
-import spotify_controller
-import tts
-import wake_word_listener
 from logging_setup import PLIK_LOGU, skonfiguruj_logowanie
 
 logger = logging.getLogger(__name__)
 
+
+# --- Ciężkie moduły ładujemy LENIWIE ---------------------------------------
+#
+# DLACZEGO, skoro zwykłe importy na górze pliku są czytelniejsze:
+#
+# Zmierzyłem czas importów na zimno (czyli tak, jak wygląda pierwsze
+# uruchomienie po restarcie komputera, gdy nic nie siedzi jeszcze w cache dysku):
+#
+#     import main .................... 49 s
+#       w tym openwakeword ........... 16 s   (z czego scikit-learn 13 s!)
+#       w tym anthropic .............. kilka s
+#       reszta: faster-whisper, av, psutil, spotipy, pywin32...
+#
+# scikit-learn to skrajny przykład marnotrawstwa: openwakeword ciągnie go
+# przez moduł do TRENOWANIA własnych słów-kluczy, którego nigdy nie używamy.
+#
+# Gorsze od samego czekania było to, że te 49 sekund mijało, ZANIM w ogóle
+# powstało okno Qt — więc przez ten czas na ekranie nie było nic. Stąd wrażenie,
+# że "kula się nie pokazuje": ona jeszcze nie istniała.
+#
+# Teraz na górze pliku zostaje tylko Qt i gui. Kula pojawia się od razu,
+# a resztę dociąga wątek roboczy w tle, już przy widocznej, pulsującej kuli.
+# Łączny czas startu się nie skrócił — ale przestał być ślepy.
+
+agent = None
+pamiec = None
+system_control = None
+tts = None
+wake_word_listener = None
+
+
+def zaladuj_moduly():
+    """
+    Importuje ciężkie moduły. Wołane z wątku roboczego, nie z głównego.
+
+    Zwykły `import` w Pythonie jest tani przy drugim wywołaniu (moduł ląduje
+    w sys.modules), więc nie ma znaczenia, że robimy to w środku funkcji —
+    koszt płacimy raz, a zyskujemy kontrolę nad tym, KIEDY go zapłacimy.
+    """
+    global agent, pamiec, system_control, tts, wake_word_listener
+
+    if wake_word_listener is not None:
+        return
+
+    import time as _time
+    poczatek = _time.time()
+    logger.info("Ładuję moduły w tle...")
+
+    # agent ciagnie za soba spotify_controller, app_launcher i przegladarke,
+    # wiec nie importujemy ich tu osobno. system_control tez przez niego
+    # przychodzi, ale main.py wola go wprost (potwierdzanie restartu),
+    # wiec bierzemy do niego wlasna referencje.
+    import agent as _agent
+    import pamiec as _pamiec
+    import system_control as _system_control
+    import tts as _tts
+    import wake_word_listener as _wake_word_listener
+
+    agent = _agent
+    pamiec = _pamiec
+    system_control = _system_control
+    tts = _tts
+    wake_word_listener = _wake_word_listener
+
+    logger.info("Moduły załadowane w %.1f s.", _time.time() - poczatek)
+
 # Ile sekund ciszy kończy rozmowę i odsyła Jarvisa z powrotem do czuwania.
-# Za mało — rozmowa urywa się, gdy zastanawiasz się nad pytaniem.
-# Za dużo — mikrofon zostaje otwarty na długo po tym, jak skończyłeś.
-LIMIT_CISZY_ROZMOWY_S = 8
+#
+# Wcześniej było tu 8 sekund i cisza była GŁÓWNYM sposobem kończenia rozmowy.
+# To psuło całą rzecz: wystarczyło zastanowić się chwilę nad pytaniem albo
+# odejść po kubek, żeby Jarvis się rozłączył i trzeba było znowu wołać go
+# po imieniu.
+#
+# Teraz rozmowę kończy się SŁOWEM ("dzięki, to tyle", "pa", "wystarczy"),
+# a ten limit jest już tylko bezpiecznikiem na wypadek, gdybyś wyszedł
+# z pokoju bez pożegnania. Dwie minuty to kompromis: wystarczająco długo,
+# żeby nie przerywać naturalnych przerw w rozmowie, i wystarczająco krótko,
+# żeby mikrofon nie został otwarty na resztę wieczoru.
+LIMIT_CISZY_ROZMOWY_S = 120
+
+# Ile razy z rzędu możemy usłyszeć dźwięk bez rozpoznawalnych słów, zanim
+# uznamy, że to nie rozmowa, tylko hałas w tle (telewizor, muzyka, rozmowa
+# w drugim pokoju). Bez tego licznika Jarvis przy włączonym telewizorze
+# potrafiłby wisieć w trybie rozmowy przez całe dwie minuty.
+MAX_PUSTYCH_Z_RZEDU = 4
 
 # Ile sekund czekamy na grzeczne zakończenie wątku nasłuchu, zanim odpuścimy.
 # Wątek sprawdza przełącznik co ~80 ms, więc w praktyce kończy się od razu;
@@ -80,67 +157,204 @@ LIMIT_CISZY_ROZMOWY_S = 8
 LIMIT_ZAMYKANIA_S = 5
 
 
-def wykonaj_akcje(decyzja):
+# --- Potwierdzanie groźnych poleceń systemowych ------------------------------
+#
+# Restartu i wyłączenia komputera nie da się cofnąć — a przesłyszeć się jest
+# łatwo (telewizor w tle, ktoś mówi w drugim pokoju). Dlatego Jarvis pyta
+# "czy na pewno?" i czeka na wyraźne "tak".
+#
+# Krótki limit, bo to pytanie zamknięte: albo odpowiadasz od razu, albo
+# widocznie nie do Ciebie było kierowane.
+LIMIT_POTWIERDZENIA_S = 8
+
+# Brak odpowiedzi, cisza i hałas znaczą "nie". Tak samo każde słowo odmowy —
+# sprawdzamy je PIERWSZE, żeby "nie, nie rób tego" nie przeszło jako zgoda
+# tylko dlatego, że padło gdzieś słowo "dobra".
+SLOWA_ODMOWY = {
+    "nie", "anuluj", "anuluję", "anuluje", "przerwij", "stop", "zostaw",
+    "czekaj", "rezygnuję", "rezygnuje", "odwołaj", "odwolaj", "no",
+}
+SLOWA_ZGODY = {
+    "tak", "jasne", "pewnie", "potwierdzam", "zgoda", "zgadza", "dawaj",
+    "śmiało", "smialo", "rób", "rob", "zrób", "zrob", "wykonaj", "oczywiście",
+    "oczywiscie", "ok", "okej", "okay", "yes", "dobra", "dobrze",
+}
+
+# Co Jarvis mówi tuż PRZED wykonaniem polecenia. Kolejność jest ważna:
+# po uśpieniu albo wyłączeniu nie byłoby już czym mówić.
+ZAPOWIEDZI_SYSTEMOWE = {
+    "zablokuj": "Blokuję ekran.",
+    "uspij": "Dobranoc, usypiam komputer.",
+    "restart": "Restartuję komputer.",
+    "wylacz": "Wyłączam komputer.",
+}
+
+ODMOWA = "Dobrze, zostawiam wszystko tak, jak jest."
+
+
+def _to_zgoda(tekst):
     """
-    Wykonuje decyzję zwróconą przez router.
+    Czy w odpowiedzi padło wyraźne "tak"?
 
-    decyzja — słownik z kluczem "action" i parametrami zależnymi od akcji
-
-    Zwraca: (komunikat dla użytkownika, czy się udało).
-    Flaga sukcesu decyduje, czy koło wróci do idle, czy błyśnie na czerwono.
+    Porównujemy CAŁE słowa, a nie fragmenty — inaczej "nie" złapałoby się
+    w "niebo", a "ok" w "okno". Cisza (None) i hałas ("") to odmowa:
+    brak potwierdzenia nigdy nie może znaczyć zgody.
     """
-    akcja = decyzja.get("action")
+    if not tekst:
+        return False
 
-    # Obie funkcje wykonawcze zwracają (komunikat, sukces), więc przekazujemy
-    # ich wynik wprost. Dzięki temu koło błyśnie także wtedy, gdy akcja
-    # została rozpoznana, ale się nie udała — np. nie znaleziono utworu
-    # albo aplikacji nie ma w konfiguracji.
-    if akcja == "play_song":
-        # .get() zamiast [] — gdyby model pominął pole, dostaniemy None
-        # zamiast wyjątku, a zagraj_piosenke() poradzi sobie z brakiem wykonawcy.
-        return spotify_controller.zagraj_piosenke(
-            decyzja.get("song"),
-            decyzja.get("artist"),
+    slowa = set(re.findall(r"[a-ząćęłńóśżź]+", tekst.lower()))
+    if slowa & SLOWA_ODMOWY:
+        return False
+    return bool(slowa & SLOWA_ZGODY)
+
+
+def _wykonaj_polecenie_systemowe(orb, polecenie):
+    """
+    Wykonuje polecenie, które agent tylko ZGŁOSIŁ podczas rozmowy: blokadę
+    ekranu, uśpienie, restart albo wyłączenie komputera.
+
+    Dlaczego tutaj, a nie w samym narzędziu agenta: narzędzia wykonują się
+    w trakcie mówienia (szczegóły w system_control.py). Uśpienie ucięłoby
+    zdanie w połowie, a pytanie o potwierdzenie nałożyłoby się na to, co
+    akurat leci z głośników — i mikrofon nagrałby oba naraz.
+
+    Zwraca: (wiadomości do dopisania do historii, czy kończyć rozmowę).
+    """
+    potwierdzenie = None
+
+    if polecenie in system_control.POLECENIA_DO_POTWIERDZENIA:
+        # Samo pytanie "czy na pewno?" Jarvis zadał już w swojej odpowiedzi —
+        # tutaj tylko słuchamy, co odpowiesz.
+        logger.info("[SYSTEM] czekam na potwierdzenie polecenia: %s", polecenie)
+        potwierdzenie = wake_word_listener.sluchaj_bez_wake_worda(
+            orb.set_state, limit_ciszy_s=LIMIT_POTWIERDZENIA_S
         )
+        logger.info("[SYSTEM] usłyszałem: %r", potwierdzenie)
 
-    if akcja == "play_album":
-        # Osobna akcja, bo Spotify gra album inaczej niż pojedynczy utwór —
-        # przez context_uri zamiast listy uris. Szczegóły w odtworz_album().
-        return spotify_controller.zagraj_album(
-            decyzja.get("album"),
-            decyzja.get("artist"),
-        )
+        if not _to_zgoda(potwierdzenie):
+            logger.info("[SYSTEM] brak zgody — odpuszczam %s.", polecenie)
+            tts.mow(ODMOWA)
+            return [
+                {"role": "user", "content": potwierdzenie or "(brak odpowiedzi)"},
+                {"role": "assistant", "content": ODMOWA},
+            ], False
 
-    if akcja == "open_app":
-        return app_launcher.otworz_aplikacje(decyzja.get("app_name"))
+    zapowiedz = ZAPOWIEDZI_SYSTEMOWE.get(polecenie, "Robi się.")
+    tts.mow(zapowiedz)
 
-    if akcja == "close_app":
-        # Zamykanie ma własne zabezpieczenia po stronie app_launcher:
-        # listę procesów chronionych, ograniczenie do procesów bieżącego
-        # użytkownika i wyższy próg dopasowania niż przy otwieraniu.
-        # main.py nie dokłada tu nic — cała ocena ryzyka jest w jednym miejscu.
-        return app_launcher.zamknij_aplikacje(decyzja.get("app_name"))
+    komunikat, sukces = system_control.wykonaj(polecenie)
+    logger.info("[SYSTEM] %s -> %s", polecenie, komunikat)
+    if not sukces:
+        tts.mow(komunikat)
 
-    # akcja == "unknown" albo cokolwiek nieprzewidzianego.
-    # Traktujemy to jak błąd, żeby koło błysnęło — inaczej nie wiedziałbyś,
-    # czy Jarvis Cię nie zrozumiał, czy w ogóle nie usłyszał.
-    return "Nie zrozumiałem komendy.", False
+    dopisz = []
+    if potwierdzenie is not None:
+        dopisz.append({"role": "user", "content": potwierdzenie})
+    dopisz.append({"role": "assistant", "content": zapowiedz if sukces else komunikat})
+
+    # Po uśpieniu, restarcie i wyłączeniu nie ma już z kim rozmawiać.
+    # Po zablokowaniu ekranu Jarvis może słuchać dalej.
+    return dopisz, sukces and polecenie != "zablokuj"
 
 
-def powiedz(orb, komunikat):
+# --- Tylko jedna kopia Jarvisa -----------------------------------------------
+#
+# Dwa uruchomienia naraz to podwójny Whisper, dwa HUD-y i dwa procesy
+# walczące o ten sam mikrofon. Łatwo o to przez przypadek: chowasz HUD
+# klawiszem ESC, zapominasz, że Jarvis działa w tle, i klikasz ponownie.
+#
+# Rozwiązanie: pierwsza kopia wystawia "skrzynkę na listy" (QLocalServer —
+# nazwany kanał komunikacji między programami na tym samym komputerze).
+# Każda kolejna kopia najpierw próbuje się do niej dobić. Jeśli się uda,
+# wie, że Jarvis już działa: wysyła prośbę "pokaż się" i sama się zamyka.
+
+NAZWA_KANALU = "jarvis-asystent-glosowy"
+
+
+def _powiadom_dzialajaca_kopie():
     """
-    Wypowiada tekst na głos, trzymając kulę w stanie "speaking".
+    Sprawdza, czy Jarvis już działa, i jeśli tak — prosi go o pokazanie okna.
 
-    mow() jest blokujące, więc przez cały czas mówienia mikrofon nie nasłuchuje
-    — to nie przypadek, tylko warunek działania całości. Gdyby nasłuch trwał
-    w tle, Jarvis usłyszałby własny głos i albo wykryłby w nim wake word,
-    albo nagrał samego siebie jako kolejną wypowiedź.
+    Zwraca: True, gdy inna kopia działa (czyli ta ma się zamknąć).
     """
-    if not komunikat:
-        return
+    from PySide6.QtNetwork import QLocalSocket
 
-    orb.set_state("speaking")
-    tts.mow(komunikat)
+    gniazdo = QLocalSocket()
+    gniazdo.connectToServer(NAZWA_KANALU)
+    if not gniazdo.waitForConnected(300):
+        return False
+
+    gniazdo.write(b"pokaz")
+    gniazdo.flush()
+    gniazdo.waitForBytesWritten(300)
+    gniazdo.disconnectFromServer()
+    return True
+
+
+def _nasluchuj_kolejnych_kopii(orb):
+    """
+    Wystawia kanał, przez który kolejne uruchomienia proszą o pokazanie HUD-a.
+
+    Zwraca: obiekt serwera — trzeba go przechować, żeby nie został posprzątany.
+    """
+    from PySide6.QtNetwork import QLocalServer
+
+    serwer = QLocalServer()
+
+    def nowe_polaczenie():
+        polaczenie = serwer.nextPendingConnection()
+        if polaczenie is not None:
+            polaczenie.close()
+        logger.info("Kolejne uruchomienie poprosiło o pokazanie HUD-a.")
+        orb.pokaz()
+
+    serwer.newConnection.connect(nowe_polaczenie)
+
+    if not serwer.listen(NAZWA_KANALU):
+        # Nie jest to powód, żeby nie działać — tracimy tylko ochronę
+        # przed drugą kopią. Zapisujemy, żeby było wiadomo dlaczego.
+        logger.warning("Nie udało się wystawić kanału dla kolejnych kopii: %s",
+                       serwer.errorString())
+
+    return serwer
+
+
+class _BudzikCtrlC:
+    """
+    Pozwala przerwać Jarvisa klawiszami Ctrl+C w terminalu, nie budząc
+    Pythona w wątku GUI, dopóki nikt ich nie wciśnie (opis w main()).
+    """
+
+    def __init__(self, app):
+        import socket
+
+        from PySide6.QtCore import QSocketNotifier
+
+        # Para połączonych gniazd: Python pisze do jednego, Qt słucha drugiego.
+        # Na Windowsie set_wakeup_fd przyjmuje wyłącznie gniazdo sieciowe.
+        self._odbior, self._nadawanie = socket.socketpair()
+        self._odbior.setblocking(False)
+        self._nadawanie.setblocking(False)
+        signal.set_wakeup_fd(self._nadawanie.fileno())
+        signal.signal(signal.SIGINT, lambda numer, ramka: app.quit())
+
+        self._notyfikator = QSocketNotifier(self._odbior.fileno(), QSocketNotifier.Type.Read)
+        self._notyfikator.activated.connect(self._odbierz)
+
+    def _odbierz(self):
+        # Sam powrót do Pythona wystarczy, żeby wykonała się obsługa SIGINT.
+        # Bajt trzeba zabrać z gniazda, inaczej Qt budziłby nas w kółko.
+        try:
+            self._odbior.recv(64)
+        except OSError:
+            pass
+
+    def zamknij(self):
+        self._notyfikator.setEnabled(False)
+        signal.set_wakeup_fd(-1)
+        self._odbior.close()
+        self._nadawanie.close()
 
 
 def rozmowa(orb, pierwszy_tekst):
@@ -148,82 +362,130 @@ def rozmowa(orb, pierwszy_tekst):
     PĘTLA WEWNĘTRZNA — obsługuje jedną sesję rozmowy.
 
     Zaczyna się od tekstu wypowiedzianego zaraz po "Hey Jarvis" i toczy się
-    dalej BEZ wake worda: po każdej odpowiedzi Jarvis sam nasłuchuje przez
-    chwilę, czy chcesz coś dodać. Kończy się, gdy przez LIMIT_CISZY_ROZMOWY_S
-    nikt się nie odezwie.
+    dalej BEZ wake worda — tak długo, jak rozmawiasz.
 
-    Historia rozmowy żyje TYLKO tutaj, jako zmienna lokalna. To celowe:
-    wyjście z tej funkcji jest równoznaczne z zapomnieniem kontekstu,
-    więc nowa rozmowa nigdy nie odziedziczy strzępów poprzedniej.
+    KAŻDA wypowiedź — i pogawędka, i "puść Nevermind" — idzie tą samą drogą,
+    do agenta. Nie ma już klasyfikowania na komendy i rozmowę, bo to właśnie
+    ono psuło ciągłość: komendy nigdy nie trafiały do historii, więc pytanie
+    "a kto to nagrał?" zadane po włączeniu albumu trafiało w próżnię.
+
+    Rozmowa NIE zaczyna się od zera — na starcie wczytujemy końcówkę
+    poprzedniej z pamięci na dysku. Dzięki temu można wrócić po godzinie
+    (albo po restarcie komputera) i podjąć wątek.
+
+
+    JAK ROZMOWA SIĘ KOŃCZY
+    ======================
+
+    Trzy drogi, w kolejności od najbardziej naturalnej:
+
+      1. POWIESZ, ŻE KONIEC — "dzięki, to tyle", "pa", "wystarczy", "śpij".
+         Decyduje o tym sam agent, przez narzędzie zakoncz_rozmowe. Celowo
+         nie ma tu listy słów kluczowych: człowiek żegna się na sto sposobów,
+         a model rozumie intencję zamiast dopasowywać wzorce.
+
+      2. DŁUGA CISZA — bezpiecznik na wypadek wyjścia z pokoju.
+
+      3. HAŁAS BEZ SŁÓW — gdy kilka razy z rzędu coś słychać, ale nie są to
+         słowa (telewizor, muzyka), uznajemy, że nikt do nas nie mówi.
     """
-    historia_rozmowy = []
+    historia_rozmowy = pamiec.poprzednia_rozmowa()
+    if historia_rozmowy:
+        logger.info("Wznawiam poprzednią rozmowę (%d wiadomości z pamięci).",
+                    len(historia_rozmowy))
+
     tekst = pierwszy_tekst
+    pustych_z_rzedu = 0
 
     while tekst is not None and not wake_word_listener.czy_zatrzymano():
-        # MÓZG — czy to komenda do wykonania, czy zwykła rozmowa?
-        decyzja = router.rozpoznaj_komende(tekst)
-        logger.info("[DECYZJA] %s", decyzja)
-        akcja = decyzja.get("action")
+        # Pusty tekst znaczy "coś było słychać, ale bez słów". Nie odpowiadamy
+        # na hałas — po prostu słuchamy dalej, jakby nic się nie stało.
+        if not tekst.strip():
+            pustych_z_rzedu += 1
+            if pustych_z_rzedu >= MAX_PUSTYCH_Z_RZEDU:
+                logger.info("Sam hałas %d razy z rzędu — kończę rozmowę.",
+                            pustych_z_rzedu)
+                break
 
-        if akcja == "chat":
-            # Rozmowa: do Sonneta idzie ORYGINALNY tekst z transkrypcji razem
-            # z historią. Router celowo nie przepisuje treści — jego zadaniem
-            # było tylko stwierdzić, że to rozmowa, a nie polecenie.
-            #
-            # Wersja strumieniowa: Jarvis zaczyna mówić pierwsze zdanie, gdy
-            # model dopiero układa drugie. Generator nie może zwrócić historii
-            # (w chwili oddania pierwszego zdania reszty jeszcze nie ma),
-            # więc składamy ją tutaj — z tego, co FAKTYCZNIE zostało wypowiedziane.
-            generator = chat.odpowiedz_rozmowa_stream(tekst, historia_rozmowy)
-
-            # Kula przełącza się na "speaking" dopiero przy pierwszym dźwięku,
-            # a nie już teraz — inaczej świeciłaby "mówię" przez te sekundę
-            # czy dwie, w których model jeszcze myśli, a z głośników nic nie leci.
-            pelna_odpowiedz = tts.mow_strumieniowo(
-                generator, na_start=lambda: orb.set_state("speaking")
+            tekst = wake_word_listener.sluchaj_bez_wake_worda(
+                orb.set_state, limit_ciszy_s=LIMIT_CISZY_ROZMOWY_S
             )
+            continue
 
-            if pelna_odpowiedz:
-                historia_rozmowy = historia_rozmowy + [
-                    {"role": "user", "content": tekst},
-                    {"role": "assistant", "content": pelna_odpowiedz},
-                ]
-                logger.info("[JARVIS] %s", pelna_odpowiedz)
-            else:
-                # Nic nie padło (błąd API albo syntezy) — nie zapisujemy do historii
-                # pytania bez odpowiedzi, bo zaburzyłoby to przeplot ról.
-                logger.warning("Rozmowa nie zwróciła żadnej treści.")
+        pustych_z_rzedu = 0
+        logger.info("[TY] %s", tekst)
 
-            orb.set_state("idle")
+        # MÓZG I RĘCE W JEDNYM. Agent sam decyduje, czy sięgnąć po narzędzie
+        # (Spotify, aplikacje, wyszukiwarka, pamięć), czy po prostu odpowiedzieć.
+        generator = agent.odpowiedz(tekst, historia_rozmowy)
 
-        elif akcja == "unknown":
-            logger.info("[JARVIS] Nie zrozumiałem polecenia.")
-            powiedz(orb, "Nie zrozumiałem polecenia.")
-            orb.set_state("idle")
+        # Agent oddaje zdania do wypowiedzenia, a na samym końcu — słownik
+        # ze stanem rozmowy. Przechwytujemy go tutaj, zanim trafi
+        # do syntezatora mowy, bo słownika nie da się wypowiedzieć.
+        stan = {}
 
+        def tylko_zdania():
+            for element in generator:
+                if isinstance(element, dict):
+                    stan.update(element)
+                else:
+                    yield element
+
+        # Kula przełącza się na "speaking" dopiero przy pierwszym dźwięku,
+        # a nie już teraz — inaczej świeciłaby "mówię" przez te sekundy,
+        # w których model jeszcze myśli, a z głośników nic nie leci.
+        wypowiedziane = tts.mow_strumieniowo(
+            tylko_zdania(), na_start=lambda: orb.set_state("speaking")
+        )
+
+        if wypowiedziane:
+            logger.info("[JARVIS] %s", wypowiedziane)
         else:
-            # RĘCE — konkretna akcja: muzyka albo aplikacja.
-            # Błąd łapiemy tutaj, żeby jedna nieudana komenda nie zabiła
-            # całej sesji — Jarvis ma powiedzieć, co poszło źle, i słuchać dalej.
-            try:
-                komunikat, sukces = wykonaj_akcje(decyzja)
-            except Exception:
-                logger.exception("Błąd podczas wykonywania komendy")
-                komunikat, sukces = "Coś poszło nie tak przy wykonywaniu komendy.", False
+            logger.warning("Agent nie zwrócił żadnej treści.")
 
-            logger.info("[JARVIS] %s", komunikat)
-            powiedz(orb, komunikat)
+        if stan.get("historia"):
+            historia_rozmowy = stan["historia"]
 
-            # Czerwony błysk sam wraca do idle po chwili (obsługuje to gui.py).
-            orb.set_state("idle" if sukces else "error")
+        orb.set_state("idle")
+
+        # Blokada ekranu, uśpienie, restart i wyłączenie czekały na ten moment:
+        # odpowiedź już wybrzmiała, więc można spytać o zgodę i wykonać.
+        if stan.get("system"):
+            dopisz, koniec_po_systemie = _wykonaj_polecenie_systemowe(
+                orb, stan["system"]
+            )
+            historia_rozmowy = historia_rozmowy + dopisz
+            orb.set_state("idle")
+            if koniec_po_systemie:
+                # Rozmowa kończy się tu, a zapis do pamięci robi wspólny
+                # kawałek kodu pod pętlą — nie duplikujemy go.
+                break
+
+        # Pożegnanie już wybrzmiało (mow_strumieniowo blokuje), więc dopiero
+        # teraz wychodzimy — inaczej Jarvis urwałby sobie "do zobaczenia"
+        # w połowie słowa.
+        if stan.get("koniec"):
+            logger.info("Agent zakończył rozmowę na prośbę użytkownika.")
+            break
 
         if wake_word_listener.czy_zatrzymano():
             break
 
-        # Nasłuch bez wake worda. None znaczy "cisza — koniec rozmowy".
+        # Nasłuch bez wake worda. None znaczy "cisza — koniec rozmowy",
+        # pusty string znaczy "hałas, słuchaj dalej".
         tekst = wake_word_listener.sluchaj_bez_wake_worda(
             orb.set_state, limit_ciszy_s=LIMIT_CISZY_ROZMOWY_S
         )
+
+    if tekst is None:
+        logger.info("Cisza przez %d s — kończę rozmowę.", LIMIT_CISZY_ROZMOWY_S)
+
+    # Koniec sesji — zachowujemy końcówkę rozmowy na dysku, żeby następnym
+    # razem (także po restarcie komputera) dało się do niej wrócić.
+    try:
+        pamiec.zapisz_rozmowe(historia_rozmowy)
+    except Exception:
+        logger.exception("Nie udało się zapisać rozmowy do pamięci")
 
 
 def petla_jarvisa(orb):
@@ -247,6 +509,10 @@ def petla_jarvisa(orb):
     # zabiłby ten wątek po cichu: kula dalej by pulsowała, ikona wisiałaby
     # w zasobniku, a Jarvis po prostu przestałby słuchać, bez śladu na ekranie.
     try:
+        # Pierwsza rzecz w wątku roboczym: dociągnięcie ciężkich modułów.
+        # Kula już wtedy pulsuje na ekranie, więc czekanie jest widoczne.
+        zaladuj_moduly()
+
         while not wake_word_listener.czy_zatrzymano():
             logger.info("=== TRYB: CZUWANIE (czekam na 'Hey Jarvis') ===")
 
@@ -272,6 +538,14 @@ def petla_jarvisa(orb):
     except Exception:
         logger.exception("Pętla nasłuchu zakończyła się nieoczekiwanym błędem")
 
+        # HUD MUSI to pokazać. Wcześniej wątek umierał po cichu, a okno dalej
+        # animowało się, jakby Jarvis słuchał — był kompletnie głuchy, a z ekranu
+        # nie dało się tego poznać. Szczegóły błędu są w jarvis.log.
+        try:
+            orb.set_state("offline")
+        except Exception:
+            pass
+
     logger.info("Pętla nasłuchu zakończona.")
 
 
@@ -284,20 +558,44 @@ def main():
     logger.info("Zamknięcie: prawy klik w ikonę zasobnika -> Zamknij Jarvisa.")
     logger.info("=" * 50)
 
+    # NIŻSZY PRIORYTET PROCESU
+    #
+    # Jarvis to asystent w tle — nie powinien odbierać procesora temu, czym
+    # akurat się zajmujesz. Priorytet "poniżej normalnego" znaczy: gdy komputer
+    # jest wolny, Jarvis dostaje tyle mocy, ile chce (więc nie działa wolniej),
+    # ale gdy grasz albo pracujesz, Windows najpierw obsługuje Twój program.
+    #
+    # To nie zmniejsza liczby widocznej w Menedżerze zadań, kiedy nic innego
+    # nie działa. Zmienia to, czy komputer "przymula", gdy Whisper akurat
+    # rozpoznaje mowę — a to zwykle jest prawdziwy problem.
+    try:
+        import psutil
+
+        psutil.Process().nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+        logger.info("Priorytet procesu: poniżej normalnego.")
+    except Exception:
+        logger.warning("Nie udało się obniżyć priorytetu procesu.", exc_info=True)
+
     app = QApplication(sys.argv)
 
-    orb = gui.JarvisOrb()
+    # Druga kopia Jarvisa niczego nie wnosi, a podwaja zużycie procesora
+    # i kłóci się z pierwszą o mikrofon. Jeśli jakaś już działa, prosimy ją
+    # o pokazanie HUD-a i kończymy.
+    if _powiadom_dzialajaca_kopie():
+        logger.info("Jarvis już działa — pokazuję jego okno zamiast startować drugi raz.")
+        return 0
 
-    # Prawy dolny róg ekranu, z marginesem nad paskiem zadań.
-    ekran = app.primaryScreen().availableGeometry()
-    orb.move(
-        ekran.right() - gui.ROZMIAR_OKNA - 40,
-        ekran.bottom() - gui.ROZMIAR_OKNA - 40,
-    )
-    orb.show()
+    # Pełnoekranowy HUD. Zmienna nazywa się dalej "orb" — reszta pliku
+    # woła na niej tylko set_state(), a ta metoda się nie zmieniła.
+    orb = gui.JarvisHUD()
+    orb.pokaz()
+
+    # Nasłuch próśb od kolejnych uruchomień. Referencję trzymamy w zmiennej,
+    # inaczej garbage collector posprzątałby serwer razem z nasłuchem.
+    serwer_kopii = _nasluchuj_kolejnych_kopii(orb)
 
     # Wątek roboczy startuje dopiero po pokazaniu okna, żeby długie ładowanie
-    # modelu Whispera odbywało się już przy widocznej, animowanej kuli
+    # modelu Whispera odbywało się już przy widocznym, animowanym HUD-zie
     # — inaczej przez pierwszą minutę wyglądałoby to jak zawieszony program.
     watek = threading.Thread(
         target=petla_jarvisa,
@@ -318,6 +616,13 @@ def main():
         posprzatano.set()
 
         logger.info("Sprzątanie: zatrzymuję wątek nasłuchu...")
+
+        # Moduł może jeszcze nie być załadowany, jeśli zamykasz Jarvisa
+        # w trakcie startu — wtedy nie ma czego zatrzymywać ani zwalniać.
+        if wake_word_listener is None:
+            logger.info("Nasłuch nie zdążył wystartować — nic do sprzątania.")
+            return
+
         wake_word_listener.zatrzymaj()
 
         watek.join(timeout=LIMIT_ZAMYKANIA_S)
@@ -336,17 +641,19 @@ def main():
 
     # Ctrl+C w aplikacji Qt: pętla zdarzeń Qt siedzi w kodzie C++ i nie oddaje
     # sterowania Pythonowi, więc domyślnie nie zauważyłby wciśnięcia Ctrl+C.
-    # Dwie rzeczy to naprawiają:
-    #   1. własna obsługa sygnału SIGINT, która woła app.quit(),
-    #   2. timer, który co 200 ms na moment wraca do Pythona i daje mu szansę
-    #      tę obsługę wykonać. Timer celowo nic nie robi — liczy się samo
-    #      to, że przerywa pobyt w kodzie Qt.
-    signal.signal(signal.SIGINT, lambda numer, ramka: app.quit())
-    budzik = QTimer()
-    budzik.timeout.connect(lambda: None)
-    budzik.start(200)
+    #
+    # Kiedyś budził go timer co 200 ms. Działało, ale każde takie budzenie to
+    # Python w wątku GUI, a ten musi wtedy czekać na GIL — i animacja HUD-a
+    # przycinała się pięć razy na sekundę, gdy Whisper akurat pracował.
+    #
+    # Teraz Python budzi się TYLKO po wciśnięciu Ctrl+C:
+    #   1. set_wakeup_fd: gdy przyjdzie sygnał, Python wpisuje bajt do gniazda,
+    #   2. QSocketNotifier: Qt widzi ten bajt i na moment wraca do Pythona,
+    #   3. wtedy wykonuje się nasza obsługa SIGINT, która woła app.quit().
+    budzik = _BudzikCtrlC(app)
 
     kod = app.exec()
+    budzik.zamknij()
 
     # Zabezpieczenie na wypadek zamknięcia inną drogą niż menu zasobnika
     # (Ctrl+C, wylogowanie użytkownika). posprzataj() jest idempotentne.

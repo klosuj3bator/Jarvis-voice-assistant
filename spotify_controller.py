@@ -346,14 +346,22 @@ def uruchom_i_poczekaj_na_spotify(sp):
     Otwiera aplikację Spotify i czeka, aż pojawi się jako urządzenie w API.
 
     "spotify:" to protokół URI zarejestrowany przez aplikację w systemie —
-    `start spotify:` mówi Windowsowi "otwórz to czymkolwiek, co obsługuje spotify:",
+    mówimy Windowsowi "otwórz to czymkolwiek, co obsługuje spotify:",
     więc działa niezależnie od tego, gdzie aplikacja jest zainstalowana
     (a Spotify z Microsoft Store nie ma normalnej ścieżki do .exe).
 
     Zwraca: device_id gotowe do grania, albo None jeśli się nie doczekaliśmy.
     """
     logger.info("Otwieram aplikację Spotify...")
-    os.system("start spotify:")
+
+    # os.startfile, a NIE os.system("start spotify:").
+    #
+    # os.system zawsze odpala wiersz poleceń (cmd.exe), który dopiero wykonuje
+    # polecenie. Gdy Jarvis działa bez konsoli (przez pythonw), Windows musi
+    # dać temu cmd własne okno — i na ekranie wyskakiwało czarne okienko.
+    # os.startfile prosi system bezpośrednio o otwarcie adresu, tak jak
+    # dwuklik w Eksploratorze, bez żadnego pośrednika i bez okna.
+    os.startfile("spotify:")
 
     # Odpytujemy w pętli zamiast jednego długiego sleep(): jeśli Spotify wstanie
     # po 3 sekundach, nie ma powodu czekać pełnych 15.

@@ -1,0 +1,26 @@
+{
+  "id": "conv-1789065422868-rojny52mj",
+  "providerId": "claude",
+  "title": "cześć działasz",
+  "titleGenerationStatus": "failed",
+  "createdAt": 1789065422870,
+  "lastActivityAt": 1789065698073,
+  "sessionId": "bfbf5c0c-eb9b-4ba4-bde2-7ff82d58f584",
+  "selectedModel": "opus",
+  "providerState": {
+    "providerSessionId": "bfbf5c0c-eb9b-4ba4-bde2-7ff82d58f584"
+  },
+  "externalContextPaths": [
+    "C:\\Users\\klose\\Desktop\\Jarvis"
+  ],
+  "usage": {
+    "model": "opus",
+    "inputTokens": 2,
+    "cacheCreationInputTokens": 212,
+    "cacheReadInputTokens": 27024,
+    "contextWindow": 1000000,
+    "contextTokens": 27238,
+    "percentage": 3,
+    "contextWindowIsAuthoritative": true
+  }
+}
