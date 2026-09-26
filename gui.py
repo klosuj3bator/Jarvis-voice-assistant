@@ -495,8 +495,8 @@ class _Most(QObject):
     Odbiorca w QML nie czeka na nic.
     """
 
-    stan = Signal(str)                     # nazwa nowego stanu
-    statystyki = Signal(float, float)      # procesor %, pamięć %
+    stan = Signal(str)        # nazwa nowego stanu
+    odczyty = Signal(list)    # wiersze do rogu ekranu (procesor, pamięć, sieć, temperatura)
 
 
 class JarvisHUD(QQuickView):
@@ -526,6 +526,7 @@ class JarvisHUD(QQuickView):
         self.setResizeMode(QQuickView.SizeRootObjectToView)
 
         self._pelny_ekran = True
+        self._ostatni_stan = "idle"
 
         rodzina = _czcionka("Bahnschrift")
         rodzina_mono = _czcionka("Consolas", "Courier New")
@@ -578,7 +579,15 @@ class JarvisHUD(QQuickView):
                 f"Nieznany stan: {nazwa_stanu!r}. Dostępne: {list(STANY)}"
             )
 
+        # Zapamiętujemy, żeby przypomnienie mogło po sobie wrócić do tego,
+        # co było wcześniej (np. "brak mikrofonu"), zamiast zawsze do "czuwam".
+        # Przypisanie jednej zmiennej jest w Pythonie bezpieczne międzywątkowo.
+        self._ostatni_stan = nazwa_stanu
         self._most.stan.emit(nazwa_stanu)
+
+    def stan_teraz(self):
+        """Ostatni stan zgłoszony przez set_state(). Bezpieczne z dowolnego wątku."""
+        return self._ostatni_stan
 
     def pokaz(self):
         """
@@ -597,15 +606,58 @@ class JarvisHUD(QQuickView):
 
     def _petla_statystyk(self):
         """
-        Wątek w tle: raz na sekundę mierzy procesor i pamięć i wysyła je scenie.
+        Wątek w tle: raz na sekundę zbiera odczyty i wysyła je scenie.
 
         cpu_percent(interval=1.0) sam czeka tę sekundę i zwraca średnie
         obciążenie z tego czasu — nie trzeba osobnego sleep().
+
+        Gotowe napisy składamy TUTAJ, a nie w QML. Dzięki temu scena nie musi
+        nic wiedzieć o megabitach ani o tym, skąd bierze się temperatura —
+        dostaje listę wierszy: etykieta, wartość, podpis i wypełnienie paska.
         """
+        import czujniki
+
+        def liczba(wartosc, miejsca=1):
+            """Polski zapis liczby: przecinek zamiast kropki."""
+            return f"{wartosc:.{miejsca}f}".replace(".", ",")
+
+        siec = czujniki.PomiarSieci()
+        lacze = czujniki.predkosc_lacza() or 100.0
+        szczyt_temperatury = 0.0
+
         while True:
             cpu = psutil.cpu_percent(interval=1.0)
+            ram = psutil.virtual_memory().percent
+            pobieranie, wysylanie = siec.odczyt()
+
+            wiersze = [
+                {"etykieta": "CPU", "wartosc": f"{cpu:.0f} %", "podpis": "",
+                 "wypelnienie": cpu / 100.0, "alarm": cpu > 80},
+                {"etykieta": "RAM", "wartosc": f"{ram:.0f} %", "podpis": "",
+                 "wypelnienie": ram / 100.0, "alarm": ram > 80},
+                {"etykieta": "SIEĆ",
+                 "wartosc": f"↓ {liczba(pobieranie)}   ↑ {liczba(wysylanie)} Mb/s",
+                 "podpis": f"szczyt ↓ {liczba(siec.szczyt_pobierania)} "
+                           f"/ łącze {lacze:.0f} Mb/s",
+                 # Pasek pokazuje, jaką część łącza zajmuje ruch.
+                 "wypelnienie": min(1.0, pobieranie / lacze), "alarm": False},
+            ]
+
+            temperatura = czujniki.temperatura()
+            if temperatura:
+                szczyt_temperatury = max(szczyt_temperatury, temperatura["teraz"])
+                udzial = temperatura["teraz"] / temperatura["limit"]
+                wiersze.append({
+                    "etykieta": temperatura["etykieta"],
+                    "wartosc": f"{temperatura['teraz']:.0f} °C",
+                    "podpis": f"maks {szczyt_temperatury:.0f} "
+                              f"/ limit {temperatura['limit']:.0f} °C",
+                    "wypelnienie": min(1.0, udzial),
+                    "alarm": udzial > czujniki.PROG_ALARMU_TEMPERATURY,
+                })
+
             try:
-                self._most.statystyki.emit(cpu, psutil.virtual_memory().percent)
+                self._most.odczyty.emit(wiersze)
             except RuntimeError:
                 # Przy zamykaniu programu Qt kasuje obiekty, a ten wątek
                 # mógł akurat skończyć pomiar. Nie ma już komu wysyłać.

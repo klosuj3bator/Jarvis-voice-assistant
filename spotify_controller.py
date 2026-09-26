@@ -466,6 +466,210 @@ def zagraj_album(nazwa_albumu, wykonawca=None):
     return f"Odtwarzam album {opis}.", True
 
 
+# ---------------------------------------------------------------
+# Sterowanie tym, co już gra
+# ---------------------------------------------------------------
+#
+# Te funkcje NIE otwierają Spotify i nie wybierają urządzenia same, w przeciwieństwie
+# do zagraj_piosenke(). Pauza czy "następny" dotyczą czegoś, co już leci — jeśli
+# nic nie leci, zgadywanie urządzenia nie ma sensu. Mówimy wtedy wprost, że nie
+# ma aktywnego urządzenia, a do włączenia muzyki służy zagraj_piosenke().
+#
+# Głośności tu celowo nie ma. Jest w system_control.py i dotyczy całego
+# komputera — dwa różne "ciszej" (w Spotify i w systemie) tylko by się gryzły.
+
+# Ile czekamy po "następny"/"poprzedni", zanim zapytamy, co teraz gra.
+# Spotify potrzebuje chwili, żeby odnotować zmianę; bez tej przerwy API
+# zwracało jeszcze stary utwór.
+CZEKANIE_NA_ZMIANE_UTWORU_S = 0.8
+
+BRAK_AKTYWNEGO_URZADZENIA = (
+    "Spotify nie ma teraz aktywnego urządzenia — nic nie gra. "
+    "Włącz coś w aplikacji Spotify albo powiedz, co puścić."
+)
+
+# Tryby powtarzania: nasza nazwa -> nazwa w API Spotify.
+TRYBY_POWTARZANIA = {
+    "wlacz": "context",   # powtarzaj album / playlistę
+    "utwor": "track",     # powtarzaj jeden utwór w kółko
+    "wylacz": "off",
+}
+
+
+def _opis_utworu(stan):
+    """
+    "Queen — Bohemian Rhapsody" z odpowiedzi current_playback(), albo None.
+
+    Pole "item" bywa puste: przy reklamie albo gdy leci podcast, który Spotify
+    opisuje inaczej niż utwory. Wtedy nie mamy czego podać.
+    """
+    utwor = (stan or {}).get("item")
+    if not utwor or not utwor.get("name"):
+        return None
+    wykonawcy = ", ".join(a["name"] for a in utwor.get("artists") or [])
+    return f"{wykonawcy} — {utwor['name']}" if wykonawcy else utwor["name"]
+
+
+def _opisz_blad_sterowania(e):
+    """
+    Tłumaczy błąd Spotify przy pauzie, przewijaniu itd. na ludzki komunikat.
+
+    Spotify dokłada do błędów odtwarzacza "powód" (reason) — dzięki niemu
+    odróżniamy brak Premium od zwykłego "tego teraz nie wolno" (np. przewijanie
+    w trakcie reklamy, która blokuje sterowanie).
+    """
+    powod = getattr(e, "reason", None) or ""
+    if e.http_status == 404 or powod == "NO_ACTIVE_DEVICE":
+        return BRAK_AKTYWNEGO_URZADZENIA
+    if powod == "PREMIUM_REQUIRED":
+        return "Spotify odmówiło — sterowanie odtwarzaniem wymaga konta Premium."
+    if e.http_status == 403:
+        return "Spotify nie pozwala na to w tej chwili (np. w trakcie reklamy)."
+    return f"Błąd Spotify: {e.msg}"
+
+
+def _steruj(akcja):
+    """
+    Wspólny szkielet wszystkich poleceń sterowania.
+
+    1. logowanie,
+    2. sprawdzenie, czy cokolwiek jest aktywne — current_playback() zwraca
+       None, gdy żadne urządzenie nie ma otwartej sesji odtwarzania,
+    3. właściwa akcja,
+    4. zamiana błędów Spotify na zdanie, które da się powiedzieć na głos.
+
+    akcja — funkcja (sp, stan) -> (komunikat, czy_się_udało)
+    """
+    try:
+        sp = zaloguj()
+        stan = sp.current_playback()
+        if not stan or not stan.get("device"):
+            return BRAK_AKTYWNEGO_URZADZENIA, False
+        return akcja(sp, stan)
+    except spotipy.SpotifyException as e:
+        logger.warning("Sterowanie Spotify: %s", e)
+        return _opisz_blad_sterowania(e), False
+
+
+def _po_zmianie_utworu(sp, stan_przed, domyslny):
+    """Po "następny"/"poprzedni" podaje, co teraz gra — jeśli Spotify już wie."""
+    time.sleep(CZEKANIE_NA_ZMIANE_UTWORU_S)
+    try:
+        stan = sp.current_playback()
+    except spotipy.SpotifyException:
+        return domyslny
+
+    stary = ((stan_przed or {}).get("item") or {}).get("id")
+    nowy = ((stan or {}).get("item") or {}).get("id")
+    opis = _opis_utworu(stan)
+    if opis and nowy != stary:
+        return f"Teraz gra: {opis}."
+    return domyslny
+
+
+def pauza():
+    """Zatrzymuje odtwarzanie."""
+    def akcja(sp, stan):
+        if not stan.get("is_playing"):
+            return "Muzyka już jest zatrzymana.", True
+        sp.pause_playback()
+        return "Zatrzymane.", True
+    return _steruj(akcja)
+
+
+def wznow():
+    """Wznawia odtwarzanie tam, gdzie się zatrzymało."""
+    def akcja(sp, stan):
+        opis = _opis_utworu(stan)
+        if stan.get("is_playing"):
+            return f"Już gra: {opis}." if opis else "Już gra.", True
+        sp.start_playback()
+        return f"Wznawiam: {opis}." if opis else "Wznawiam.", True
+    return _steruj(akcja)
+
+
+def nastepny():
+    """Przełącza na następny utwór i mówi, co teraz leci."""
+    def akcja(sp, stan):
+        sp.next_track()
+        return _po_zmianie_utworu(sp, stan, "Przełączone na następny."), True
+    return _steruj(akcja)
+
+
+def poprzedni():
+    """Wraca do poprzedniego utworu i mówi, co teraz leci."""
+    def akcja(sp, stan):
+        sp.previous_track()
+        return _po_zmianie_utworu(sp, stan, "Wracam do poprzedniego."), True
+    return _steruj(akcja)
+
+
+def co_gra():
+    """Tytuł i wykonawca bieżącego utworu (także zatrzymanego)."""
+    def akcja(sp, stan):
+        opis = _opis_utworu(stan)
+        if opis is None:
+            return "Coś jest włączone, ale Spotify nie podaje tytułu (np. reklama).", True
+        if stan.get("is_playing"):
+            return f"Teraz gra: {opis}.", True
+        return f"Zatrzymane na: {opis}.", True
+    return _steruj(akcja)
+
+
+def losowo(wlacz):
+    """Włącza albo wyłącza losową kolejność."""
+    def akcja(sp, stan):
+        sp.shuffle(bool(wlacz))
+        return ("Losowe odtwarzanie włączone." if wlacz
+                else "Losowe odtwarzanie wyłączone."), True
+    return _steruj(akcja)
+
+
+def powtarzanie(tryb):
+    """
+    Ustawia powtarzanie: "wlacz" (album/playlista), "utwor" (jeden utwór)
+    albo "wylacz".
+    """
+    tryb_api = TRYBY_POWTARZANIA.get(tryb)
+    if tryb_api is None:
+        return f"Nieznany tryb powtarzania: {tryb!r}.", False
+
+    def akcja(sp, stan):
+        sp.repeat(tryb_api)
+        return {"context": "Powtarzanie włączone.",
+                "track": "Powtarzam ten utwór.",
+                "off": "Powtarzanie wyłączone."}[tryb_api], True
+    return _steruj(akcja)
+
+
+# Jedno wejście dla agenta — nazwy poleceń w jednym miejscu, jak w system_control.
+POLECENIA_ODTWARZANIA = {
+    "pauza": pauza,
+    "wznow": wznow,
+    "nastepny": nastepny,
+    "poprzedni": poprzedni,
+    "co_gra": co_gra,
+    "losowo_wlacz": lambda: losowo(True),
+    "losowo_wylacz": lambda: losowo(False),
+    "powtarzaj": lambda: powtarzanie("wlacz"),
+    "powtarzaj_utwor": lambda: powtarzanie("utwor"),
+    "nie_powtarzaj": lambda: powtarzanie("wylacz"),
+}
+
+
+def steruj_odtwarzaniem(polecenie):
+    """
+    GŁÓWNE WEJŚCIE sterowania — to woła agent.py.
+
+    Zwraca: (komunikat, czy_się_udało).
+    """
+    funkcja = POLECENIA_ODTWARZANIA.get((polecenie or "").strip().lower())
+    if funkcja is None:
+        return (f"Nieznane polecenie odtwarzania: {polecenie!r}. "
+                f"Dostępne: {', '.join(POLECENIA_ODTWARZANIA)}.", False)
+    return funkcja()
+
+
 # --- Blok testowy: uruchom `python spotify_controller.py`, żeby sprawdzić cały flow ---
 if __name__ == "__main__":
     from logging_setup import skonfiguruj_logowanie

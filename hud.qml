@@ -43,8 +43,8 @@ Item {
 
     property string stan: "idle"
     readonly property var parametry: stany[stan] || ({})
-    property real cpu: 0
-    property real ram: 0
+    // Wiersze odczytów w rogu ekranu — gotowe napisy składa gui.py.
+    property var odczyty: []
 
     // Odbiór sygnałów z gui.py. To zwykły JavaScript w wątku GUI —
     // nie czeka na Pythona, więc nie przycina animacji.
@@ -56,9 +56,8 @@ Item {
             if (nazwa === "error")
                 powrotZBledu.restart()
         }
-        function onStatystyki(procesor, pamiec) {
-            hud.cpu = procesor
-            hud.ram = pamiec
+        function onOdczyty(wiersze) {
+            hud.odczyty = wiersze
         }
     }
 
@@ -332,29 +331,30 @@ Item {
         text: hud.dzien; color: hud.blady
     }
 
-    // Prawy górny róg: procesor i pamięć z paskami.
+    // Prawy górny róg: procesor, pamięć, sieć i temperatura — każde z paskiem.
     Repeater {
-        model: 2
+        model: hud.odczyty
         Item {
             id: odczyt
+            required property var modelData
             required property int index
-            readonly property string nazwa: index === 0 ? "CPU" : "RAM"
-            readonly property real wartosc: index === 0 ? hud.cpu : hud.ram
-            readonly property real szer: hud.rozmiar * 12
+            readonly property real szer: hud.rozmiar * 14
             x: hud.width - hud.margines - szer
-            y: hud.margines + index * hud.rozmiar * 3
+            y: hud.margines + index * hud.rozmiar * 3.6
             width: szer
 
             Text {
                 y: hud.rozmiar - metrykaMala.ascent
-                font.family: hud.rodzina; font.pixelSize: hud.rozmiar; font.letterSpacing: hud.rozmiar * 0.12
-                text: odczyt.nazwa; color: hud.jasny
+                font.family: hud.rodzina; font.pixelSize: hud.rozmiar
+                font.letterSpacing: hud.rozmiar * 0.12
+                text: odczyt.modelData.etykieta; color: hud.jasny
             }
             Text {
                 width: odczyt.szer; height: hud.rozmiar * 1.3
                 horizontalAlignment: Text.AlignRight; verticalAlignment: Text.AlignVCenter
-                font.family: hud.rodzina; font.pixelSize: hud.rozmiar; font.letterSpacing: hud.rozmiar * 0.12
-                text: Math.round(odczyt.wartosc) + " %"; color: hud.jasny
+                font.family: hud.rodzina; font.pixelSize: hud.rozmiar
+                font.letterSpacing: hud.rozmiar * 0.12
+                text: odczyt.modelData.wartosc; color: hud.jasny
             }
             Rectangle {
                 y: hud.rozmiar * 1.6
@@ -362,10 +362,20 @@ Item {
                 color: hud.kolorZ(hud.kolorTekstu, 40 / 255)
                 Rectangle {
                     height: parent.height
-                    width: parent.width * Math.min(100, odczyt.wartosc) / 100
-                    // Pasek robi się bursztynowy przy dużym obciążeniu.
-                    color: hud.kolorZ(odczyt.wartosc > 80 ? hud.akcentTekstu : hud.kolorTekstu, 210 / 255)
+                    width: parent.width * odczyt.modelData.wypelnienie
+                    // Pasek robi się bursztynowy przy dużym obciążeniu
+                    // albo wysokiej temperaturze.
+                    color: hud.kolorZ(odczyt.modelData.alarm ? hud.akcentTekstu
+                                                             : hud.kolorTekstu, 210 / 255)
                 }
+            }
+            // Podpis pod paskiem: szczyt prędkości albo limit temperatury.
+            Text {
+                y: hud.rozmiar * 2.3
+                width: odczyt.szer
+                horizontalAlignment: Text.AlignRight
+                font.family: hud.rodzina; font.pixelSize: hud.rozmiar * 0.8
+                text: odczyt.modelData.podpis; color: hud.blady
             }
         }
     }

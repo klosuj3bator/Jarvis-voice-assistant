@@ -31,12 +31,16 @@ import asyncio
 import io
 import logging
 import queue
+import re
 import threading
+import time
 
 import av
 import edge_tts
 import numpy as np
 import sounddevice as sd
+
+import zajetosc
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +52,20 @@ GLOS = "pl-PL-MarekNeural"
 # "+0%" to naturalne tempo; "+15%" brzmi bardziej energicznie i skraca oczekiwanie.
 TEMPO = "+8%"
 WYSOKOSC = "+0Hz"
+
+
+def _da_sie_wypowiedziec(tekst):
+    """
+    Czy w tekście jest cokolwiek do powiedzenia?
+
+    Syntezator Microsoftu na tekście bez liter i cyfr — "...", "!!!" — nie
+    zwraca żadnego dźwięku, tylko zgłasza błąd. W dzienniku wyglądało to jak
+    poważna awaria, a w głośnikach jak cisza bez wyjaśnienia. Zdarzyło się
+    naprawdę: model odpowiedział samym wielokropkiem i Jarvis zaniemówił.
+
+    Zwraca: True, jeśli jest co syntezować.
+    """
+    return bool(tekst) and re.search(r"\w", tekst, re.UNICODE) is not None
 
 
 def _syntezuj(tekst):
@@ -127,30 +145,34 @@ def mow(tekst):
 
     Zwraca: True, jeśli udało się wypowiedzieć; False przy błędzie.
     """
-    if not tekst or not tekst.strip():
+    if not _da_sie_wypowiedziec(tekst):
+        logger.info("Nie ma czego wypowiedzieć: %r", tekst)
         return False
 
-    try:
-        dane_mp3 = _syntezuj(tekst)
-    except Exception:
-        # Najczęstsza przyczyna to brak internetu — synteza dzieje się po stronie
-        # Microsoftu. Jarvis ma wtedy zamilknąć, a nie przewrócić się.
-        logger.exception("Nie udało się zsyntezować mowy")
-        return False
+    # Jedno mówienie naraz — przypomnienie i odpowiedź nie wejdą sobie w słowo
+    # (opis w zajetosc.py).
+    with zajetosc.zajmij("mówienie"):
+        try:
+            dane_mp3 = _syntezuj(tekst)
+        except Exception:
+            # Najczęstsza przyczyna to brak internetu — synteza dzieje się po
+            # stronie Microsoftu. Jarvis ma wtedy zamilknąć, a nie przewrócić się.
+            logger.exception("Nie udało się zsyntezować mowy")
+            return False
 
-    if not dane_mp3:
-        logger.warning("Syntezator zwrócił puste nagranie dla: %r", tekst)
-        return False
+        if not dane_mp3:
+            logger.warning("Syntezator zwrócił puste nagranie dla: %r", tekst)
+            return False
 
-    try:
-        audio, czestotliwosc = _dekoduj_mp3(dane_mp3)
-        sd.play(audio, czestotliwosc)
-        # wait() blokuje aż do końca odtwarzania — to ono robi z tej funkcji
-        # funkcję synchroniczną.
-        sd.wait()
-    except Exception:
-        logger.exception("Nie udało się odtworzyć mowy")
-        return False
+        try:
+            audio, czestotliwosc = _dekoduj_mp3(dane_mp3)
+            sd.play(audio, czestotliwosc)
+            # wait() blokuje aż do końca odtwarzania — to ono robi z tej funkcji
+            # funkcję synchroniczną.
+            sd.wait()
+        except Exception:
+            logger.exception("Nie udało się odtworzyć mowy")
+            return False
 
     logger.info("Powiedziałem: %s", tekst)
     return True
@@ -180,14 +202,32 @@ def _przygotuj_audio(tekst):
 # każe generować tekst, którego użytkownik może nigdy nie usłyszeć.
 ROZMIAR_BUFORA = 2
 
+# Po przerwaniu czekamy najwyżej tyle, aż agent domknie odpowiedź i odda
+# historię. Zwykle to ułamek sekundy; dłużej tylko wtedy, gdy akurat trwa
+# narzędzie, którego nie da się przerwać w połowie (np. szukanie w Spotify).
+MAKS_CZEKANIA_PO_PRZERWANIU_S = 20
 
-def mow_strumieniowo(generator_zdan, na_start=None):
+# Zdanie, które właśnie leci z głośników. Nasłuch "Hey Jarvis" w trakcie
+# mówienia sprawdza je, żeby Jarvis nie przerwał sam siebie, gdy mówi
+# "Hej, tu Jarvis" (opis w wake_word_listener.py, WejscieWSlowo).
+_aktualne_zdanie = ""
+
+
+def aktualne_zdanie():
+    """Zdanie, które właśnie jest odtwarzane (pusty napis, gdy cisza)."""
+    return _aktualne_zdanie
+
+
+def mow_strumieniowo(generator_zdan, na_start=None, przerwanie=None):
     """
     Wypowiada zdania z generatora, przygotowując kolejne w tle.
 
-    generator_zdan — generator oddający całe zdania (np. z chat.odpowiedz_rozmowa_stream)
+    generator_zdan — generator oddający całe zdania (np. z agent.odpowiedz)
     na_start       — opcjonalna funkcja wołana tuż przed pierwszym dźwiękiem
                      (main.py przełącza tym kulę na stan "speaking")
+    przerwanie     — opcjonalny threading.Event. Gdy ktoś go ustawi (i zawoła
+                     przerwij()), mowa milknie w pół zdania, a funkcja wraca
+                     z tym, co zdążyło zabrzmieć — patrz WEJŚCIE W SŁOWO niżej.
 
 
     PODWÓJNE BUFOROWANIE — NA CZYM TO POLEGA
@@ -224,11 +264,34 @@ def mow_strumieniowo(generator_zdan, na_start=None):
     wypowiedzi na zapas, gdybyś przerwał ją w połowie.
 
     Funkcja pozostaje BLOKUJĄCA — wraca dopiero po wybrzmieniu ostatniego
-    zdania. Mikrofon przez cały ten czas nie nasłuchuje, więc Jarvis
-    nie usłyszy samego siebie.
+    zdania (albo po przerwaniu).
 
-    Zwraca: pełny tekst wszystkich WYPOWIEDZIANYCH zdań, sklejony spacjami.
+
+    WEJŚCIE W SŁOWO
+    ===============
+
+    Gdy w trakcie mówienia padnie "Hey Jarvis", nasłuch z innego wątku ustawia
+    `przerwanie` i woła przerwij(). Tu trzeba wtedy zadbać o trzy rzeczy:
+
+      1. Cisza natychmiast — także gdy przerwanie trafi w chwilę MIĘDZY
+         zdaniami. Dlatego sprawdzamy flagę przed i po sd.play(): jeśli
+         nasłuch zatrzymał stary dźwięk ułamek sekundy przed startem nowego,
+         nowy zatrzymujemy sami.
+      2. Wątek przygotowujący NIE MOŻE zawisnąć na pełnej kolejce. Po
+         przerwaniu dalej ją opróżniamy, aż skończy.
+      3. Generator agenta trzeba dojeść do końca — na samym końcu oddaje
+         historię rozmowy. Producent przestaje więc syntezować (po co, skoro
+         nikt nie usłyszy), ale dalej pobiera z generatora, a agent sam
+         przerywa generowanie, gdy zobaczy flagę.
+
+    Zwraca: pełny tekst WYPOWIEDZIANYCH zdań, sklejony spacjami. Przy
+    przerwaniu ostatnie z nich mogło zabrzmieć tylko częściowo.
     """
+    global _aktualne_zdanie
+
+    def przerwano():
+        return przerwanie is not None and przerwanie.is_set()
+
     # maxsize wymusza, że wątek w tle wyprzedza odtwarzanie najwyżej
     # o ROZMIAR_BUFORA zdań, zamiast produkować bez opamiętania.
     kolejka = queue.Queue(maxsize=ROZMIAR_BUFORA)
@@ -241,7 +304,10 @@ def mow_strumieniowo(generator_zdan, na_start=None):
         """Pobiera zdania z generatora, syntezuje je i wkłada do kolejki."""
         try:
             for zdanie in generator_zdan:
-                if not zdanie or not zdanie.strip():
+                # Po przerwaniu tylko dojadamy generator (punkt 3 w opisie).
+                # Znaki przestankowe bez ani jednej litery pomijamy w ciszy —
+                # patrz _da_sie_wypowiedziec().
+                if przerwano() or not _da_sie_wypowiedziec(zdanie):
                     continue
                 audio, czestotliwosc = _przygotuj_audio(zdanie)
                 if audio is None:
@@ -249,7 +315,8 @@ def mow_strumieniowo(generator_zdan, na_start=None):
                     # Lepiej zgubić zdanie niż uciąć całą odpowiedź.
                     logger.warning("Pomijam zdanie, którego nie udało się zsyntezować.")
                     continue
-                kolejka.put((zdanie, audio, czestotliwosc))
+                if not przerwano():
+                    kolejka.put((zdanie, audio, czestotliwosc))
         except Exception:
             logger.exception("Błąd w wątku przygotowującym mowę")
         finally:
@@ -263,38 +330,116 @@ def mow_strumieniowo(generator_zdan, na_start=None):
     wypowiedziane = []
     pierwsze = True
 
-    while True:
-        element = kolejka.get()
-        if element is KONIEC:
-            break
+    # Zajmujemy usta na CAŁĄ wypowiedź, a nie na każde zdanie osobno —
+    # inaczej przypomnienie mogłoby wskoczyć w przerwę między zdaniami.
+    with zajetosc.zajmij("mówienie"):
+        while not przerwano():
+            # Z krótkim limitem, żeby przerwanie w czasie, gdy agent jeszcze
+            # myśli nad pierwszym zdaniem, też zadziałało od razu.
+            try:
+                element = kolejka.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if element is KONIEC or przerwano():
+                break
 
-        zdanie, audio, czestotliwosc = element
+            zdanie, audio, czestotliwosc = element
 
-        if pierwsze:
-            if na_start is not None:
-                na_start()
-            pierwsze = False
+            if pierwsze:
+                if na_start is not None:
+                    na_start()
+                pierwsze = False
 
-        sd.play(audio, czestotliwosc)
-        sd.wait()  # to tutaj funkcja pozostaje blokująca
+            _aktualne_zdanie = zdanie
+            sd.play(audio, czestotliwosc)
+            if przerwano():
+                sd.stop()   # punkt 1 w opisie: przerwanie tuż przed startem zdania
+            sd.wait()  # to tutaj funkcja pozostaje blokująca
+            _aktualne_zdanie = ""
 
-        wypowiedziane.append(zdanie)
+            wypowiedziane.append(zdanie)
 
-    watek.join(timeout=5)
+    if przerwano():
+        # Punkt 2 w opisie: opróżniamy kolejkę, aż producent skończy.
+        limit = time.monotonic() + MAKS_CZEKANIA_PO_PRZERWANIU_S
+        while watek.is_alive() and time.monotonic() < limit:
+            try:
+                kolejka.get(timeout=0.1)
+            except queue.Empty:
+                pass
+        if watek.is_alive():
+            logger.warning("Agent nie skończył w %d s od przerwania — nie czekam dłużej.",
+                           MAKS_CZEKANIA_PO_PRZERWANIU_S)
+    else:
+        watek.join(timeout=5)
 
     pelny_tekst = " ".join(wypowiedziane)
     if pelny_tekst:
-        logger.info("Powiedziałem (%d zdań): %s", len(wypowiedziane), pelny_tekst)
+        logger.info("Powiedziałem (%d zdań%s): %s", len(wypowiedziane),
+                    ", PRZERWANE" if przerwano() else "", pelny_tekst)
 
     return pelny_tekst
 
 
+def synteza_ogg(tekst):
+    """
+    Zamienia tekst na głosówkę w formacie, który Telegram pokazuje jako
+    wiadomość głosową (z falą dźwięku i przyciskiem odtwarzania).
+
+    Telegram jest tu wybredny: MP3 od edge-tts przyjmie, ale wyświetli jako
+    zwykły plik muzyczny. Jako głosówkę pokazuje wyłącznie OGG z kodekiem
+    Opus — tym samym, którego używa do nagrań z telefonu. Przekodowujemy więc
+    MP3 na Opus przez PyAV, który i tak jest w projekcie.
+
+    Niczego nie odtwarza, więc NIE bierze blokady mówienia z zajetosc.py —
+    głosówka dla telefonu nie wchodzi w słowo temu, co mówią głośniki.
+
+    Zwraca: bajty pliku .ogg albo None przy błędzie.
+    """
+    if not _da_sie_wypowiedziec(tekst):
+        return None
+
+    try:
+        mp3 = _syntezuj(tekst)
+        if not mp3:
+            return None
+
+        wejscie = av.open(io.BytesIO(mp3))
+        bufor = io.BytesIO()
+        wyjscie = av.open(bufor, mode="w", format="ogg")
+
+        # 48 kHz mono — natywna częstotliwość Opusa. 32 kb/s to jakość
+        # głosówek z telefonu: mowa brzmi czysto, a plik jest malutki.
+        strumien = wyjscie.add_stream("libopus", rate=48000, layout="mono")
+        strumien.bit_rate = 32_000
+
+        # Opus przyjmuje dźwięk porcjami o ściśle określonej długości
+        # (20 ms). frame_size w resamplerze tnie próbki właśnie na takie porcje.
+        resampler = av.AudioResampler(
+            format="s16", layout="mono", rate=48000,
+            frame_size=strumien.codec_context.frame_size or 960,
+        )
+
+        for ramka in wejscie.decode(wejscie.streams.audio[0]):
+            for porcja in resampler.resample(ramka):
+                wyjscie.mux(strumien.encode(porcja))
+        # Dokończenie: resampler i koder trzymają jeszcze końcówkę w buforze.
+        for porcja in resampler.resample(None):
+            wyjscie.mux(strumien.encode(porcja))
+        wyjscie.mux(strumien.encode(None))
+
+        wyjscie.close()
+        wejscie.close()
+        return bufor.getvalue()
+    except Exception:
+        logger.exception("Nie udało się przygotować głosówki dla: %r", tekst)
+        return None
+
+
 def przerwij():
     """
-    Natychmiast przerywa mówienie.
-
-    Przyda się później, gdy będziesz chciał móc wejść Jarvisowi w słowo —
-    na razie nic tego nie woła.
+    Natychmiast ucisza głośniki. BEZPIECZNE z dowolnego wątku — woła to
+    nasłuch "Hey Jarvis" w trakcie mówienia (patrz mow_strumieniowo).
     """
     sd.stop()
 

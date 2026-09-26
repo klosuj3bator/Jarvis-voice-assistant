@@ -15,13 +15,24 @@ nie wymaga konta, klucza API ani sieci (poza jednorazowym pobraniem modeli).
 """
 
 import atexit
+import collections
+import contextlib
+import datetime
+import difflib
 import logging
 import os
+import re
+import sys
 import threading
 import time
+import unicodedata
+import wave
 
 import numpy as np
 import sounddevice as sd
+
+import slownik
+import zajetosc
 
 # faster_whisper i openwakeword są importowane LENIWIE, w funkcjach poniżej.
 #
@@ -41,10 +52,35 @@ logger = logging.getLogger(__name__)
 # Inne gotowe opcje: "alexa", "hey_mycroft", "hey_rhasspy".
 MODEL_WAKE_WORD = "hey_jarvis"
 
-# Próg pewności 0.0-1.0, powyżej którego uznajemy słowo za wykryte.
-# 0.5 to rozsądny start. Podnieś (np. 0.7), jeśli odpala się samo z siebie;
-# obniż (np. 0.3), jeśli musisz powtarzać frazę kilka razy.
-PROG_WYKRYCIA = 0.5
+# Próg pewności 0.0-1.0, powyżej którego od razu uznajemy słowo za wykryte.
+#
+# DLACZEGO TAK NISKO (wcześniej było 0.5)
+# =======================================
+# Model "hey_jarvis" trenowano na angielskiej wymowie. Ta sama fraza
+# powiedziana po polsku dostaje znacznie niższą ocenę. Zmierzone
+# na nagraniach z syntezatora mowy:
+#
+#     "Hey Jarvis" angielskim głosem ....... 0.999
+#     "Hej Dżarwis" (polska wymowa) ........ 0.99
+#     "Hey Jarvis" polskim głosem .......... 0.44    <- przy progu 0.5 nie działało
+#     "Hej Dżarwis" głosem kobiecym ........ 0.29    <- też nie
+#     "Hej Jarwis" (polskie "j") ........... 0.09    <- tym bardziej
+#
+# Czyli to nie mikrofon i nie akcent — to próg odrzucał poprawne próby.
+# (Głośność nagrania prawie nic nie zmienia: te same frazy ściszone
+# czterokrotnie dostawały niemal identyczne oceny.)
+#
+# A ile dostaje zwykła mowa BEZ słowa aktywującego? Na prawdziwym nagraniu
+# z tego mikrofonu: najwyżej 0.0096 i ani jednej ramki powyżej 0.05.
+# Margines jest więc ogromny — stąd 0.2.
+#
+# Gdyby Jarvis zaczął się odzywać sam z siebie, podnieś tę wartość.
+PROG_WYKRYCIA = 0.2
+
+# Drugi próg: za nisko, żeby reagować od razu, ale wyraźnie powyżej szumu.
+# Takie "podejrzenie" sprawdzamy jeszcze raz, Whisperem — patrz
+# _potwierdz_whisperem(). To ono łapie wymowę "Hej Jarwis" z ocenami ~0.09.
+PROG_PODEJRZENIA = 0.04
 
 # Ile sekund nagrywamy po usłyszeniu wake worda. Stała długość — bez wykrywania ciszy.
 CZAS_NAGRANIA = 5
@@ -173,6 +209,60 @@ SAMPLE_RATE = 16000
 DLUGOSC_RAMKI = 1280
 
 
+# --- Druga droga wykrywania: potwierdzanie Whisperem ---
+#
+# Model wake worda ocenia BRZMIENIE i po polsku bywa niepewny. Whisper
+# rozumie MOWĘ i tę samą frazę zapisuje poprawnie nawet wtedy, gdy detektor
+# dał jej 0.09. Łączymy więc oba: detektor pracuje cały czas (jest tani),
+# a przy niepewnym wyniku pytamy Whispera, czy naprawdę padło "Jarvis".
+#
+# Model celowo "tiny", nie "small". Zmierzone na tym komputerze:
+#
+#     small ... 5,5 s  <- nie do przyjęcia dla słowa aktywującego
+#     base .... 1,8 s  i przy tym mylił warianty wymowy
+#     tiny .... 0,8 s  i trafił we wszystkie
+#
+# (Whisper zawsze liczy 30-sekundowe okno, więc krótszy fragment nie jest
+# szybszy — o czasie decyduje wyłącznie rozmiar modelu.)
+MODEL_POTWIERDZENIA = "tiny"
+
+# Ile ostatnich sekund dźwięku trzymamy pod ręką na potrzeby potwierdzenia.
+# Przy 1,5 s Whisper gubił początek frazy ("i Arwiz"), przy 2 s było dobrze.
+BUFOR_POTWIERDZENIA_S = 2.0
+
+# Najkrótszy odstęp między dwoma potwierdzeniami. Bez niego hałas wpadający
+# w okolice progu podejrzenia potrafiłby odpalać Whispera kilka razy na sekundę.
+ODSTEP_POTWIERDZEN_S = 1.5
+
+# Ile czekamy od pierwszego podejrzenia, zanim uruchomimy Whispera.
+#
+# Ocena detektora narasta w trakcie wymawiania frazy: zaczyna od ułamków,
+# a szczyt osiąga dopiero na jej końcu. Bez tej zwłoki Whisper ruszałby już
+# przy 0.05, choć pół sekundy później wynik i tak przekroczyłby próg
+# i odpowiedź byłaby natychmiastowa.
+#
+# 0.8 s to mniej więcej długość wypowiedzenia "Hey Jarvis". Zwłoka NIE opóźnia
+# trudnych przypadków: gdy podejrzany dźwięk ucichnie wcześniej, Whisper
+# rusza od razu. Liczy się tylko wtedy, gdy dźwięk trwa dłużej.
+OPOZNIENIE_POTWIERDZENIA_S = 0.8
+
+# Przy wejściu w słowo: ile dźwięku SPRZED wykrycia dokładamy na początek
+# nagrania polecenia. Detektor zgłasza "Hey Jarvis" kilka ramek po jego końcu,
+# a te ramki to już początek polecenia. Bez tego "Hej Jarvis, puść album…"
+# wychodziło jako "Duct album…" — pierwsze słowo zjadał detektor.
+OGON_PO_WYKRYCIU_S = 0.4
+
+# Jak Whisper zapisuje usłyszane "Jarvis". Nie trzeba przewidzieć wszystkich
+# form — porównujemy z nimi PODOBIEŃSTWO słowa, nie równość.
+WZORCE_JARVIS = ("jarvis", "jarwis", "dzarvis", "dzarwis", "dziarwis",
+                 "czarvis", "charvis", "arwis")
+
+# Jak bardzo słowo musi być podobne do jednego z wzorców (0.0-1.0).
+# 0.8 przepuszcza "jarwiz" i "dżarvisie", a odrzuca "jarzyny" (0.61)
+# i "jarosław" — sprawdzone na liście zwykłych polskich zdań.
+PROG_PODOBIENSTWA = 0.8
+
+
 # --- Zasoby współdzielone między wywołaniami sluchaj_komendy() ---
 #
 # Detektor, model Whispera i strumień mikrofonu tworzymy RAZ i trzymamy tutaj.
@@ -180,6 +270,7 @@ DLUGOSC_RAMKI = 1280
 # kilka sekund ładowania modelu i ponowne otwieranie urządzenia audio.
 _detektor = None
 _model_whisper = None
+_model_potwierdzenia = None
 _stream = None
 
 # Sygnał "kończymy". Event to bezpieczny międzywątkowo przełącznik:
@@ -231,8 +322,7 @@ def _przygotuj(callback_stanu=None):
 
     if _detektor is None:
         _detektor = _utworz_detektor()
-    if _model_whisper is None:
-        _model_whisper = _wczytaj_model_whisper()
+    _zapewnij_model_whispera()
     if _stream is None:
         _otworz_mikrofon(callback_stanu)
 
@@ -558,32 +648,217 @@ def _wczytaj_model_whisper():
     return model
 
 
-def _czekaj_na_wake_word():
+def _wczytaj_model_potwierdzenia():
+    """
+    Wczytuje mały model Whispera, którym potwierdzamy niepewne trafienia.
+
+    Wołane LENIWIE — dopiero przy pierwszym podejrzeniu. Jeśli wymawiasz
+    wake word wyraźnie i detektor radzi sobie sam, ten model nigdy się
+    nie wczyta i nie zajmie pamięci.
+
+    Zwraca: obiekt WhisperModel.
+    """
+    from faster_whisper import WhisperModel
+
+    logger.info("Wczytuję mały model '%s' do potwierdzania wake worda...",
+                MODEL_POTWIERDZENIA)
+    try:
+        # Jak przy dużym modelu: najpierw z dysku, bez odpytywania sieci.
+        return WhisperModel(MODEL_POTWIERDZENIA, device="cpu", compute_type="int8",
+                            cpu_threads=2, local_files_only=True)
+    except Exception:
+        logger.info("Modelu '%s' nie ma w cache — pobieram (jednorazowo, ~40 MB)...",
+                    MODEL_POTWIERDZENIA)
+        return WhisperModel(MODEL_POTWIERDZENIA, device="cpu", compute_type="int8",
+                            cpu_threads=2)
+
+
+def _bez_ogonkow(tekst):
+    """
+    "Dżarwiś" -> "dzarwis".
+
+    Whisper zapisuje usłyszane imię raz tak, raz tak — porównywanie liter
+    ma sens dopiero wtedy, gdy ogonki i kreski nie robią różnicy.
+    """
+    rozlozony = unicodedata.normalize("NFD", tekst.lower().replace("ł", "l"))
+    return "".join(znak for znak in rozlozony
+                   if unicodedata.category(znak) != "Mn")
+
+
+def _brzmi_jak_jarvis(tekst):
+    """
+    Czy w tekście padło słowo brzmiące jak "Jarvis"?
+
+    Porównujemy PODOBIEŃSTWO, nie równość, bo Whisper zapisuje to imię
+    na kilkanaście sposobów: "Jarwiz", "Dżarvisie", "Arwis". Gotowa lista
+    nigdy nie byłaby kompletna, a miara podobieństwa łapie i te formy,
+    których nikt nie przewidział.
+    """
+    for slowo in re.findall(r"[a-z]+", _bez_ogonkow(tekst or "")):
+        for wzorzec in WZORCE_JARVIS:
+            if difflib.SequenceMatcher(None, slowo, wzorzec).ratio() >= PROG_PODOBIENSTWA:
+                return True
+    return False
+
+
+def _potwierdz_whisperem(bufor):
+    """
+    Sprawdza, czy w ostatnich sekundach dźwięku naprawdę padło "Jarvis".
+
+    bufor — kolejka ramek audio (int16) z ostatnich BUFOR_POTWIERDZENIA_S sekund
+
+    Zwraca: True, jeśli Whisper usłyszał tam imię Jarvisa.
+    """
+    global _model_potwierdzenia
+
+    if _model_potwierdzenia is None:
+        _model_potwierdzenia = _wczytaj_model_potwierdzenia()
+
+    audio = np.concatenate(bufor).astype(np.float32) / 32768.0
+
+    try:
+        segmenty, _ = _model_potwierdzenia.transcribe(
+            audio,
+            language=JEZYK,
+            # beam_size=1 to najszybszy tryb. Przy jednym słowie do rozpoznania
+            # szukanie lepszych wariantów i tak niczego nie wnosi.
+            beam_size=1,
+            without_timestamps=True,
+            condition_on_previous_text=False,
+            temperature=0.0,
+            vad_filter=True,
+        )
+        tekst = " ".join(segment.text for segment in segmenty).strip()
+    except Exception:
+        # Potwierdzanie to dodatek — jego awaria nie może zatrzymać nasłuchu.
+        logger.exception("Potwierdzanie Whisperem zawiodło")
+        return False
+
+    trafione = _brzmi_jak_jarvis(tekst)
+    logger.info("[POTWIERDZENIE] usłyszałem %r -> %s",
+                tekst, "to Jarvis" if trafione else "nie o mnie")
+    return trafione
+
+
+def _czekaj_na_wake_word(pomijaj_gdy_zajety=True, stop=None, ignoruj=None, ogon=None):
     """
     Blokuje działanie programu, dopóki nie usłyszy "Hey Jarvis".
 
-    Dla każdej 80-milisekundowej porcji audio detektor zwraca słownik
-    {nazwa_modelu: pewność 0.0-1.0}. Czekamy, aż pewność przekroczy próg.
+    Parametry są dla wejścia w słowo (WejscieWSlowo niżej) — przy zwykłym
+    czuwaniu zostają domyślne:
+      pomijaj_gdy_zajety — False: słuchamy także wtedy, gdy Jarvis mówi
+      stop               — threading.Event kończący czekanie (Jarvis skończył)
+      ignoruj            — funkcja; gdy zwróci True, wykrycie pomijamy
+                           (Jarvis sam właśnie wymawia "Jarvis")
+      ogon               — lista; po wykryciu dopisujemy do niej ostatnie
+                           OGON_PO_WYKRYCIU_S dźwięku (patrz opis stałej)
 
-    Zwraca: True gdy wykryto słowo, False gdy poproszono o zatrzymanie programu.
+    Dla każdej 80-milisekundowej porcji audio detektor zwraca słownik
+    {nazwa_modelu: pewność 0.0-1.0}. Dalej są dwie drogi:
+
+      WYNIK > PROG_WYKRYCIA        -> reagujemy natychmiast,
+      WYNIK > PROG_PODEJRZENIA     -> pytamy Whispera, czy to naprawdę było
+                                      "Jarvis" (ok. 0,8 s, patrz opis stałych).
+
+    Druga droga istnieje dlatego, że detektor ocenia brzmienie i przy polskiej
+    wymowie bywa bardzo niepewny — potrafi dać poprawnej frazie 0.09.
+
+    Zwraca: True gdy wykryto słowo, False gdy poproszono o zatrzymanie programu
+    (albo gdy ustawiono `stop`).
     """
-    logger.info("[NASŁUCH] Czekam na 'Hey Jarvis'...")
+    if pomijaj_gdy_zajety:
+        logger.info("[NASŁUCH] Czekam na 'Hey Jarvis'...")
+
+    # Bufor ostatnich sekund dźwięku dla potwierdzania. deque z maxlen sam
+    # wyrzuca najstarszą ramkę, więc zużycie pamięci jest stałe.
+    bufor = collections.deque(
+        maxlen=max(1, round(BUFOR_POTWIERDZENIA_S * SAMPLE_RATE / DLUGOSC_RAMKI))
+    )
+    ostatnie_potwierdzenie = 0.0
+    poczatek_podejrzenia = None
+    szczyt_podejrzenia = 0.0
+
+    def sam_sie_wola():
+        """Wykrycie na własnym głosie Jarvisa — pomijamy i czyścimy stan."""
+        if ignoruj is None or not ignoruj():
+            return False
+        logger.info("[WEJŚCIE W SŁOWO] Pomijam — to ja sam mówię 'Jarvis'.")
+        _detektor.reset()
+        bufor.clear()
+        return True
+
+    def zapamietaj_ogon():
+        if ogon is not None:
+            ile = max(1, round(OGON_PO_WYKRYCIU_S * SAMPLE_RATE / DLUGOSC_RAMKI))
+            ogon.extend(list(bufor)[-ile:])
 
     # Warunek pętli sprawdza przełącznik co ~80 ms, więc zamknięcie programu
     # jest natychmiastowe nawet wtedy, gdy Jarvis stoi bezczynnie godzinami.
-    while not _zatrzymaj_sie.is_set():
+    while not _zatrzymaj_sie.is_set() and not (stop is not None and stop.is_set()):
         # Czytamy dokładnie tyle próbek, ile detektor oczekuje w jednej porcji.
         dane, _ = _stream.read(DLUGOSC_RAMKI)
         # Mikrofon zwraca kształt (n, 1) — spłaszczamy do zwykłej listy próbek.
         audio = dane.flatten()
 
-        wyniki = _detektor.predict(audio)
+        # Gdy Jarvis sam teraz mówi (np. wypowiada przypomnienie), mikrofon
+        # słyszy jego głos z głośników. Pomijamy te ramki, żeby nie obudził
+        # sam siebie i nie liczył własnych słów jako Twoich.
+        if pomijaj_gdy_zajety and not zajetosc.czy_wolny():
+            bufor.clear()
+            poczatek_podejrzenia = None
+            continue
+
+        bufor.append(audio)
 
         # Bierzemy najwyższy wynik zamiast szukać po nazwie klucza — nazwa modelu
         # w słowniku bywa wersjonowana ("hey_jarvis_v0.1"), więc tak jest odporniej.
-        if max(wyniki.values()) > PROG_WYKRYCIA:
+        wynik = max(_detektor.predict(audio).values())
+
+        if wynik > PROG_WYKRYCIA:
+            if sam_sie_wola():
+                continue
+            logger.info("[WYKRYTO] pewność %.3f", wynik)
+            zapamietaj_ogon()
             # reset() czyści wewnętrzny bufor detektora. Bez tego przez chwilę
             # pamiętałby świeże wykrycie i po powrocie odpalałby się od razu ponownie.
+            _detektor.reset()
+            return True
+
+        teraz = time.monotonic()
+
+        if wynik > PROG_PODEJRZENIA:
+            # Podejrzenie trwa. Nie wołamy Whispera od razu: ocena detektora
+            # narasta z każdą sylabą i za moment może przekroczyć próg pewności,
+            # a wtedy odpowiedź będzie natychmiastowa i za darmo.
+            if poczatek_podejrzenia is None:
+                poczatek_podejrzenia = teraz
+                szczyt_podejrzenia = wynik
+            else:
+                szczyt_podejrzenia = max(szczyt_podejrzenia, wynik)
+
+            if teraz - poczatek_podejrzenia < OPOZNIENIE_POTWIERDZENIA_S:
+                continue
+        elif poczatek_podejrzenia is None:
+            # Zwykła cisza albo mowa, w której nic nie przypomina wake worda.
+            continue
+
+        # Tu docieramy w dwóch przypadkach: podejrzany dźwięk właśnie ucichł
+        # albo trwa dłużej niż zwłoka. W obu czas zapytać Whispera.
+        podejrzenie = szczyt_podejrzenia
+        poczatek_podejrzenia = None
+
+        # Odstęp chroni procesor: bez niego dźwięk balansujący w okolicach
+        # progu odpalałby Whispera kilka razy na sekundę.
+        if (len(bufor) < bufor.maxlen
+                or teraz - ostatnie_potwierdzenie < ODSTEP_POTWIERDZEN_S):
+            continue
+        ostatnie_potwierdzenie = teraz
+        if sam_sie_wola():
+            continue
+
+        logger.info("[PODEJRZENIE] pewność %.3f — sprawdzam Whisperem...", podejrzenie)
+        if _potwierdz_whisperem(bufor):
+            zapamietaj_ogon()
             _detektor.reset()
             return True
 
@@ -617,9 +892,48 @@ def _nagraj(sekundy=CZAS_NAGRANIA):
     return np.concatenate(porcje).astype(np.float32) / 32768.0
 
 
-def _rozpoznaj_mowe(audio):
+# Whisper jest jeden, a korzystać z niego mogą dwa wątki naraz: nasłuch
+# mikrofonu i most do Telegrama (głosówki z telefonu). Blokada ustawia je
+# w kolejce. RLock, bo _zapewnij_model_whispera() i _rozpoznaj_mowe()
+# biorą ją po sobie w tym samym wątku.
+_blokada_whispera = threading.RLock()
+
+
+def _zapewnij_model_whispera():
+    """Wczytuje model Whispera, jeśli jeszcze go nie ma — dokładnie raz."""
+    global _model_whisper
+    with _blokada_whispera:
+        if _model_whisper is None:
+            _model_whisper = _wczytaj_model_whisper()
+
+
+def przepisz_nagranie(audio):
+    """
+    Przepisuje GOTOWE nagranie na tekst — np. głosówkę z Telegrama.
+
+    audio — tablica float32, 16 kHz, mono (-1.0..1.0)
+
+    W przeciwieństwie do reszty tego modułu nie dotyka mikrofonu, więc
+    działa nawet wtedy, gdy mikrofonu nie ma. Bezpieczne z dowolnego wątku.
+
+    Zwraca: rozpoznany tekst (pusty, jeśli nic nie rozpoznano).
+    """
+    _zapewnij_model_whispera()
+    tekst, _jezyk, _pewnosc = _rozpoznaj_mowe(audio, filtruj_cisze=True)
+    return tekst
+
+
+def _rozpoznaj_mowe(audio, filtruj_cisze=True):
     """
     Zamienia nagranie na tekst.
+
+    filtruj_cisze — czy Whisper ma sam odsiewać ciszę. W trybie rozmowy
+                    dajemy False, bo nagranie jest już przycięte naszym
+                    własnym wykrywaczem mowy, a filtr potrafi wtedy zjeść
+                    początek albo koniec krótkiej wypowiedzi. Zmierzone:
+                    "Dzięki." z filtrem wychodziło jako "Genki.",
+                    a "Ciszej." jako "Ciszyj."; bez filtra oba poprawnie.
+                    Na ciszy i szumie Whisper i tak nic nie zmyślił.
 
     Zwraca: (tekst, kod_języka, pewność_języka).
     """
@@ -640,27 +954,87 @@ def _rozpoznaj_mowe(audio):
     #
     # beam_size zostaje 5 — przy wymuszonym języku różnica między 1 a 5
     # mieści się w błędzie pomiaru, więc nie ma po co oddawać dokładności.
-    segmenty, info = _model_whisper.transcribe(
-        audio,
-        beam_size=5,
-        vad_filter=True,
-        language=JEZYK,
-        # Znaczniki czasu to dodatkowe tokeny do wygenerowania, a my i tak
-        # bierzemy sam tekst.
-        without_timestamps=True,
-        # Bez tego Whisper doklejał do zapytania własną poprzednią transkrypcję
-        # "dla kontekstu". Przy osobnych komendach to tylko zaszumia wynik.
-        condition_on_previous_text=False,
-        # Domyślnie po nieudanej próbie Whisper powtarza dekodowanie z wyższą
-        # temperaturą. Przy krótkich komendach te powtórki kosztują więcej,
-        # niż dają.
-        temperature=0.0,
-    )
+    #
+    # hotwords to słownik nazw własnych, które pewnie padną: Twoi wykonawcy,
+    # albumy, aplikacje (slownik.py — tam też pomiary). Bez niego "Kaz Bałagane"
+    # wychodziło jako "kazba łagany". W faster-whisper hotwords i initial_prompt
+    # trafiają w to samo miejsce modelu, ale hotwords działa w każdym
+    # 30-sekundowym oknie nagrania, a initial_prompt tylko w pierwszym — przy
+    # dłuższej głosówce z Telegrama to różnica.
+    try:
+        podpowiedz = slownik.podpowiedzi() or None
+    except Exception:
+        # Słownik to dodatek — jego awaria nie może wyłączyć rozpoznawania mowy.
+        logger.exception("Słownik podpowiedzi zawiódł — rozpoznaję bez niego")
+        podpowiedz = None
+    with _blokada_whispera:
+        segmenty, info = _model_whisper.transcribe(
+            audio,
+            beam_size=5,
+            vad_filter=filtruj_cisze,
+            language=JEZYK,
+            # Znaczniki czasu to dodatkowe tokeny do wygenerowania, a my i tak
+            # bierzemy sam tekst.
+            without_timestamps=True,
+            # Bez tego Whisper doklejał do zapytania własną poprzednią transkrypcję
+            # "dla kontekstu". Przy osobnych komendach to tylko zaszumia wynik.
+            condition_on_previous_text=False,
+            # Domyślnie po nieudanej próbie Whisper powtarza dekodowanie z wyższą
+            # temperaturą. Przy krótkich komendach te powtórki kosztują więcej,
+            # niż dają.
+            temperature=0.0,
+            hotwords=podpowiedz,
+        )
 
-    # transcribe() zwraca generator — tekst powstaje dopiero tutaj, przy łączeniu segmentów.
-    tekst = " ".join(segment.text.strip() for segment in segmenty).strip()
+        # transcribe() zwraca generator — tekst powstaje dopiero tutaj, przy
+        # łączeniu segmentów. Dlatego łączenie też musi być pod blokadą.
+        tekst = " ".join(segment.text.strip() for segment in segmenty).strip()
 
     return tekst, info.language, info.language_probability
+
+
+# Nagrania, z których Whisper nie wydobył ani słowa, zapisujemy na dysk.
+# Dzięki temu da się ich POSŁUCHAĆ i rozstrzygnąć, co zawiodło: czy mikrofon
+# nagrał szept, czy Whisper nie poradził sobie ze zrozumiałą wypowiedzią.
+# Bez tego oba przypadki wyglądają w dzienniku identycznie.
+#
+# Pliki zostają wyłącznie na tym komputerze — nic nie jest nigdzie wysyłane.
+# Folder jest w .gitignore, a najstarsze nagrania kasują się same.
+# Żeby wyłączyć zapisywanie, ustaw poniżej False.
+ZAPISUJ_NIEROZPOZNANE = True
+KATALOG_NIEROZPOZNANYCH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "nierozpoznane")
+LIMIT_NIEROZPOZNANYCH = 10
+
+
+def _zapisz_nierozpoznane(audio, glosnosc):
+    """Zapisuje nagranie bez rozpoznanych słów do folderu diagnostycznego."""
+    if not ZAPISUJ_NIEROZPOZNANE:
+        return
+
+    try:
+        os.makedirs(KATALOG_NIEROZPOZNANYCH, exist_ok=True)
+        # Głośność w nazwie pliku, żeby dało się jednym spojrzeniem odróżnić
+        # ciche nagrania (problem z mikrofonem) od głośnych (problem z mową).
+        nazwa = (datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                 + f"_{glosnosc:.0f}dBFS.wav")
+        sciezka = os.path.join(KATALOG_NIEROZPOZNANYCH, nazwa)
+
+        with wave.open(sciezka, "wb") as plik:
+            plik.setnchannels(1)
+            plik.setsampwidth(2)     # 16 bitów na próbkę
+            plik.setframerate(SAMPLE_RATE)
+            plik.writeframes((np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes())
+
+        # Zostawiamy tylko kilka najnowszych — folder nie może rosnąć bez końca.
+        nagrania = sorted(os.listdir(KATALOG_NIEROZPOZNANYCH))
+        for stare in nagrania[:-LIMIT_NIEROZPOZNANYCH]:
+            os.remove(os.path.join(KATALOG_NIEROZPOZNANYCH, stare))
+
+        logger.info("[ROZMOWA] Nagranie do sprawdzenia: %s", sciezka)
+    except Exception:
+        # Diagnostyka nie może przeszkadzać w działaniu.
+        logger.exception("Nie udało się zapisać nierozpoznanego nagrania")
 
 
 def _oproznij_bufor():
@@ -716,17 +1090,21 @@ def sluchaj_komendy(callback_stanu=None):
 
         logger.info("[WYKRYTO] Usłyszałem 'Hey Jarvis'!")
 
-        zglos("listening")
-        audio = _nagraj()
+        # Od tej chwili mikrofon jest "nasz": przypomnienie z reminders.py
+        # poczeka ze swoim głosem, zamiast nagrać się razem z Twoją komendą
+        # (opis w zajetosc.py).
+        with zajetosc.zajmij("nagrywanie komendy"):
+            zglos("listening")
+            audio = _nagraj()
 
-        if audio.size == 0:
-            return ""  # nagrywanie przerwane przez zamykanie programu
+            if audio.size == 0:
+                return ""  # nagrywanie przerwane przez zamykanie programu
 
-        zglos("processing")
-        tekst, jezyk, pewnosc = _rozpoznaj_mowe(audio)
+            zglos("processing")
+            tekst, jezyk, pewnosc = _rozpoznaj_mowe(audio)
 
-        # Czyścimy bufor dopiero teraz, po transkrypcji.
-        _oproznij_bufor()
+            # Czyścimy bufor dopiero teraz, po transkrypcji.
+            _oproznij_bufor()
     except sd.PortAudioError as e:
         _mikrofon_utracony(e)
         return ""
@@ -808,13 +1186,21 @@ def sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
         return None
 
 
-def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
+def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8, po_przerwaniu=False,
+                            poczatek=()):
     """
     Nasłuchuje BEZ wymagania "Hey Jarvis" — to tryb trwającej rozmowy.
 
     orb_callback  — funkcja przyjmująca nazwę stanu (jak w sluchaj_komendy)
     limit_ciszy_s — ile czekamy na to, aż zaczniesz mówić, zanim uznamy
                     rozmowę za skończoną
+    po_przerwaniu — True, gdy właśnie wszedłeś Jarvisowi w słowo (WejscieWSlowo).
+                    Wtedy NIE wyrzucamy zaległego dźwięku z mikrofonu — to
+                    początek Twojego nowego polecenia — i nie patrzymy na
+                    zajetosc: usta i uszy trzyma przerywana właśnie wymiana
+                    zdań, a czekanie na nią byłoby czekaniem na samych siebie.
+    poczatek      — ramki sprzed startu nagrywania, doklejane na jego początek
+                    (przy wejściu w słowo: OGON_PO_WYKRYCIU_S)
 
     Różnica wobec sluchaj_komendy() jest dwojaka:
 
@@ -847,7 +1233,8 @@ def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
     # Stan VAD-a jest ciągły między wywołaniami (to sieć rekurencyjna),
     # więc przed każdą nową wypowiedzią zaczynamy od czystego licznika.
     vad.reset_states()
-    _oproznij_bufor()
+    if not po_przerwaniu:
+        _oproznij_bufor()
 
     logger.info("[ROZMOWA] Słucham dalej, bez wake worda (max %s s ciszy)...", limit_ciszy_s)
 
@@ -860,42 +1247,63 @@ def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
     from collections import deque
     pre_bufor = deque(maxlen=dlugosc_pre_bufora)
 
-    porcje = []
-    mowa_trwa = False
-    ramek_ciszy = 0
     ramek_czekania = 0
 
+    # Faza 1: czekamy, aż ktoś się odezwie.
     while not _zatrzymaj_sie.is_set():
         dane, _ = _stream.read(DLUGOSC_RAMKI)
         pcm = dane.flatten()
 
-        wynik = float(vad.predict(pcm, frame_size=RAMKA_VAD))
-        jest_mowa = wynik > PROG_VAD
-
-        if not mowa_trwa:
-            # Faza 1: czekamy, aż ktoś się odezwie.
-            pre_bufor.append(pcm)
-
-            if jest_mowa:
-                mowa_trwa = True
-                ramek_ciszy = 0
-                # Doklejamy bufor sprzed wykrycia, żeby nie zgubić pierwszej głoski.
-                porcje = list(pre_bufor)
-                zglos("listening")
-                logger.info("[ROZMOWA] Słyszę mowę, nagrywam...")
-                continue
-
-            ramek_czekania += 1
-            if ramek_czekania >= limit_czekania:
-                logger.info("[ROZMOWA] Cisza przez %s s — kończę sesję rozmowy.",
-                            limit_ciszy_s)
-                return None
+        # Gdy Jarvis sam mówi (przypomnienie), mikrofon słyszy jego głos
+        # z głośników — nie bierzemy tego za Twoją wypowiedź.
+        if not po_przerwaniu and not zajetosc.czy_wolny():
+            pre_bufor.clear()
+            vad.reset_states()
             continue
 
-        # Faza 2: nagrywamy, aż zapadnie cisza.
+        pre_bufor.append(pcm)
+        if float(vad.predict(pcm, frame_size=RAMKA_VAD)) > PROG_VAD:
+            break
+
+        ramek_czekania += 1
+        if ramek_czekania >= limit_czekania:
+            logger.info("[ROZMOWA] Cisza przez %s s — kończę sesję rozmowy.",
+                        limit_ciszy_s)
+            return None
+
+    if _zatrzymaj_sie.is_set():
+        return None
+
+    # Faza 2: ktoś mówi — nagrywamy, aż zapadnie cisza. Na ten czas zajmujemy
+    # mikrofon, żeby przypomnienie nie odezwało się w środku Twojego zdania.
+    # (Po przerwaniu zajmuje go już przerywana wymiana zdań — opis wyżej.)
+    with contextlib.nullcontext() if po_przerwaniu else zajetosc.zajmij("nagrywanie rozmowy"):
+        zglos("listening")
+        logger.info("[ROZMOWA] Słyszę mowę, nagrywam...")
+        return _dokoncz_wypowiedz(list(poczatek) + list(pre_bufor), vad, zglos,
+                                  limit_ciszy_konczacej, limit_nagrania)
+
+
+def _dokoncz_wypowiedz(porcje, vad, zglos, limit_ciszy_konczacej, limit_nagrania):
+    """
+    Druga połowa _sluchaj_bez_wake_worda(): nagrywa do ciszy i rozpoznaje.
+
+    porcje — to, co już nagraliśmy, łącznie z buforem sprzed wykrycia mowy
+             (żeby nie zgubić pierwszej głoski)
+
+    Wydzielona, bo cały ten fragment musi się zmieścić w jednym bloku
+    `with zajetosc.zajmij(...)` — od pierwszego słowa do gotowego tekstu.
+
+    Zwraca to samo co _sluchaj_bez_wake_worda(): tekst, "" albo None.
+    """
+    ramek_ciszy = 0
+
+    while not _zatrzymaj_sie.is_set():
+        dane, _ = _stream.read(DLUGOSC_RAMKI)
+        pcm = dane.flatten()
         porcje.append(pcm)
 
-        if jest_mowa:
+        if float(vad.predict(pcm, frame_size=RAMKA_VAD)) > PROG_VAD:
             ramek_ciszy = 0
         else:
             ramek_ciszy += 1
@@ -916,14 +1324,23 @@ def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
     zglos("processing")
 
     audio = np.concatenate(porcje).astype(np.float32) / 32768.0
-    logger.info("[ROZMOWA] Nagrałem %.1f s, rozpoznaję...", len(audio) / SAMPLE_RATE)
 
-    tekst, jezyk, pewnosc = _rozpoznaj_mowe(audio)
+    # Głośność nagrania w dBFS: 0 to maksimum, -60 to szept na granicy słyszalności.
+    # Przy pustej transkrypcji to pierwsza rzecz, którą warto sprawdzić w dzienniku:
+    # cicha wypowiedź wygląda w nim tak samo jak każda inna, dopóki nie zmierzymy.
+    glosnosc = 20 * np.log10(max(float(np.sqrt(np.mean(audio ** 2))), 1e-6))
+    logger.info("[ROZMOWA] Nagrałem %.1f s (głośność %.0f dBFS), rozpoznaję...",
+                len(audio) / SAMPLE_RATE, glosnosc)
+
+    # Nagranie jest już przycięte naszym wykrywaczem mowy — patrz _rozpoznaj_mowe().
+    tekst, jezyk, pewnosc = _rozpoznaj_mowe(audio, filtruj_cisze=False)
     _oproznij_bufor()
 
     if tekst:
         logger.info("[ROZMOWA] (%s, %.0f%%) %s", jezyk, pewnosc * 100, tekst)
         return tekst
+
+    _zapisz_nierozpoznane(audio, glosnosc)
 
     # VAD usłyszał dźwięk, ale Whisper nie wydobył z niego słów — to najczęściej
     # kaszlnięcie, trzaśnięcie drzwiami albo muzyka w tle.
@@ -936,6 +1353,104 @@ def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
     # odsyłało Jarvisa z powrotem do czekania na "Hey Jarvis".
     logger.info("[ROZMOWA] Dźwięk bez rozpoznanych słów.")
     return ""
+
+
+# --- Wejście w słowo: "Hey Jarvis" w trakcie odpowiedzi -----------------------
+
+class WejscieWSlowo:
+    """
+    Nasłuch "Hey Jarvis" przez cały czas, gdy Jarvis myśli i mówi.
+
+    Dotąd mikrofon w tym czasie w ogóle nie słuchał — żeby Jarvis nie usłyszał
+    sam siebie. Teraz słucha, i to w osobnym wątku, bo wątek główny jest wtedy
+    zajęty mówieniem. Po wykryciu:
+
+      1. woła `na_wykrycie` — main.py ucisza wtedy głośniki i każe agentowi
+         przestać generować,
+      2. OD RAZU, w tym samym wątku, nagrywa Twoje nowe polecenie i je
+         rozpoznaje. Nie oddajemy mikrofonu z powrotem wątkowi głównemu,
+         bo zanim ten skończy sprzątać po przerwanej odpowiedzi, minęłoby
+         pół sekundy — a to akurat pierwsze słowa polecenia.
+
+    Mikrofon czyta w danej chwili tylko jeden wątek: ten tutaj od start() do
+    zakoncz() albo do końca nagrania. main.py sięga po mikrofon dopiero potem.
+
+
+    CZY JARVIS NIE PRZERWIE SAM SIEBIE?
+    ===================================
+
+    Bez tłumienia echa mikrofon słyszy głośniki. Zmierzone 26.09 na głosie
+    Jarvisa puszczonym przez detektor: zwykłe zdania dają 0,000 — także
+    "Jestem Jarvis". Odpala dopiero "Hej, tu Jarvis" (0,397). Dlatego gdy
+    właśnie odtwarzane zdanie brzmi jak "Jarvis" (`co_mowie`), wykrycia
+    pomijamy. "Hej Jarvis" innym głosem na tle mówiącego Jarvisa dawało
+    0,26-0,45, czyli ponad próg — wejście w słowo działa nawet bez słuchawek.
+    """
+
+    def __init__(self, na_wykrycie, co_mowie=None, callback_stanu=None, limit_ciszy_s=8):
+        self._na_wykrycie = na_wykrycie
+        self._co_mowie = co_mowie or (lambda: "")
+        self._callback_stanu = callback_stanu
+        self._limit_ciszy_s = limit_ciszy_s
+        self._stop = threading.Event()
+        self._wykryto = threading.Event()
+        self._polecenie = None
+        self._watek = None
+
+    def start(self):
+        """Zaczyna nasłuch. Bez mikrofonu po prostu nic nie robi."""
+        if _stream is None or _detektor is None:
+            return
+        self._watek = threading.Thread(target=self._praca, name="watek-wejscia-w-slowo",
+                                       daemon=True)
+        self._watek.start()
+
+    def _praca(self):
+        try:
+            # Detektor pamięta ostatnie ramki sprzed tej odpowiedzi — zaczynamy czysto.
+            _detektor.reset()
+            ogon = []
+            if not _czekaj_na_wake_word(pomijaj_gdy_zajety=False, stop=self._stop,
+                                        ignoruj=self._sam_sie_wolam, ogon=ogon):
+                return
+            self._wykryto.set()
+            logger.info("[WEJŚCIE W SŁOWO] Usłyszałem 'Hey Jarvis' — milknę i słucham.")
+            self._na_wykrycie()
+            self._polecenie = _sluchaj_bez_wake_worda(
+                self._callback_stanu, self._limit_ciszy_s, po_przerwaniu=True, poczatek=ogon)
+        except sd.PortAudioError as e:
+            _mikrofon_utracony(e)
+        except Exception:
+            logger.exception("[WEJŚCIE W SŁOWO] Nasłuch w trakcie odpowiedzi zawiódł")
+
+    def _sam_sie_wolam(self):
+        return _brzmi_jak_jarvis(self._co_mowie())
+
+    def zakoncz(self):
+        """
+        Odpowiedź się skończyła — kończymy czuwanie, jeśli nikt nie przerwał.
+
+        Zwraca: True, jeśli przerwano (wtedy nagrywanie polecenia trwa dalej
+        i trzeba po nie sięgnąć przez polecenie()).
+        """
+        self._stop.set()
+        if self._watek is not None and not self._wykryto.is_set():
+            # Najwyżej jedna ramka mikrofonu albo jedno potwierdzenie Whisperem.
+            self._watek.join(timeout=5)
+            if self._watek.is_alive() and not self._wykryto.is_set():
+                logger.warning("[WEJŚCIE W SŁOWO] Nasłuch nie zakończył się w 5 s.")
+        return self._wykryto.is_set()
+
+    def polecenie(self):
+        """
+        Polecenie wypowiedziane po przerwaniu — czeka, aż zostanie nagrane.
+
+        Zwraca to samo co sluchaj_bez_wake_worda(): tekst, "" (hałas bez słów)
+        albo None (po "Hey Jarvis" zapadła cisza).
+        """
+        if self._watek is not None:
+            self._watek.join()
+        return self._polecenie
 
 
 def zamknij():
@@ -956,13 +1471,69 @@ def zamknij():
         logger.info("Mikrofon zwolniony.")
 
 
+def kalibracja(ile_prob=5):
+    """
+    Sprawdza, jak Twoja wymowa "Hey Jarvis" wypada na tle progów.
+
+    Uruchom: python wake_word_listener.py kalibracja
+
+    Po każdej próbie wypisuje najwyższą ocenę detektora i mówi, czy
+    wystarczyłaby do natychmiastowej reakcji, czy Jarvis musiałby
+    dopytywać Whispera. Na końcu podpowiada próg dopasowany do Ciebie.
+    """
+    _przygotuj()
+    print("\nPowiedz 'Hey Jarvis' po każdym sygnale. Ctrl+C przerywa.\n")
+
+    wyniki = []
+    for numer in range(1, ile_prob + 1):
+        print(f"  Próba {numer}/{ile_prob} — mów teraz...", end="", flush=True)
+
+        najlepszy = 0.0
+        _detektor.reset()
+        # 3 sekundy na jedną próbę.
+        for _ in range(int(3 * SAMPLE_RATE / DLUGOSC_RAMKI)):
+            dane, _ = _stream.read(DLUGOSC_RAMKI)
+            najlepszy = max(najlepszy, max(_detektor.predict(dane.flatten()).values()))
+
+        wyniki.append(najlepszy)
+        if najlepszy > PROG_WYKRYCIA:
+            ocena = "reakcja natychmiastowa"
+        elif najlepszy > PROG_PODEJRZENIA:
+            ocena = "potwierdzenie Whisperem (ok. 1 s później)"
+        else:
+            ocena = "NIE WYKRYTO — spróbuj wymówić 'Hej Dżarwis'"
+        print(f"  ocena {najlepszy:.3f} -> {ocena}")
+
+    print(f"\nNajsłabsza próba: {min(wyniki):.3f}, najlepsza: {max(wyniki):.3f}")
+    print(f"Progi w kodzie: wykrycie {PROG_WYKRYCIA}, podejrzenie {PROG_PODEJRZENIA}")
+    if min(wyniki) < PROG_PODEJRZENIA:
+        print("Twoje najsłabsze próby są poniżej progu podejrzenia — obniż "
+              "PROG_PODEJRZENIA w wake_word_listener.py.")
+    elif min(wyniki) < PROG_WYKRYCIA:
+        print(f"Chcesz reagować od razu, bez czekania? Ustaw PROG_WYKRYCIA "
+              f"na {max(0.02, min(wyniki) * 0.8):.2f}.")
+    else:
+        print("Wszystkie próby są powyżej progu — Jarvis reaguje od razu.")
+    zamknij()
+
+
 # --- Test samego modułu: `python wake_word_listener.py` ---
 # Pełnego Jarvisa uruchamiasz przez `python main.py` — tutaj sprawdzasz tylko,
 # czy mikrofon, wake word i transkrypcja działają.
+#
+# `python wake_word_listener.py kalibracja` sprawdza samo słowo aktywujące.
 if __name__ == "__main__":
     from logging_setup import skonfiguruj_logowanie
 
     skonfiguruj_logowanie()
+
+    if "kalibracja" in sys.argv:
+        try:
+            kalibracja()
+        except KeyboardInterrupt:
+            zatrzymaj()
+            zamknij()
+        raise SystemExit
 
     logger.info("Dostępne urządzenia wejściowe:")
     for i, urzadzenie in enumerate(sd.query_devices()):

@@ -4,3 +4,12 @@ __pycache__/
 jarvis.log
 jarvis.log.*
 apps_cache.json
+notatki/
+nierozpoznane/
+reminders.json
+email_watches.json
+memory.json
+memory.json.tmp
+slownik.json
+slownik.json.tmp
+.spotify_cache_slownik

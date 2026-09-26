@@ -1,60 +1,53 @@
 {
-  "fakty": [
-    "Użytkownik chce, żeby reagować tylko wtedy, gdy zwróci się bezpośrednio — zaczynając od \"Jarvis\" albo \"Hey\".",
-    "Użytkownik chce, żeby zwracać się do niego per \"mistrzu\".",
-    "Użytkownik chce, żeby Jarvis był całkowicie apolityczny i szczery, bez żadnych politycznych poglądów.",
-    "Gdy użytkownik mówi \"puść to gówno\", chodzi mu o album RIOTT Otsochodzi.",
-    "Gdy użytkownik mówi \"puść ten twardy sh*t\" (lub podobnie), chodzi mu o album RIOTT Otsochodzi."
-  ],
   "ostatnia_rozmowa": [
     {
       "role": "user",
-      "content": "I i i widzę twoją twarz, widzę twoją złotę, to nie do ciebie żarwis, sobie śpiewam. Teraz mnie nie słuchaj."
+      "content": "[bez \"Hey Jarvis\"] Mi chodziło o to, żebyś odpalił mi Steam'a na komputerze i drugie karcie na Operze Geeks otworzył YouTube'a."
     },
     {
       "role": "assistant",
-      "content": "Jasne, śpiewaj sobie spokojnie, mistrzu — ja czekam z boku."
+      "content": "Zrobione, mistrzu — Steam się uruchamia, a YouTube masz otwarty w Operze."
     },
     {
       "role": "user",
-      "content": "Hmm, jedyne co wywołał uśmiech to jebany szmalu. Bądź dla mnie, nawet jak świat mnie nie broni, gin za mnie."
+      "content": "[po \"Hey Jarvis\"] Przyszły jakieś maile z tymi, z rekrutacjami albo ofertami"
     },
     {
       "role": "assistant",
-      "content": "..."
+      "content": "Jest jeden mail z ofertą pracy - z GoWork, dotyczy stanowiska doradcy do spraw sprzedaży energii i gazu w firmie Eco Dla Biznesu. Reszta to newslettery i sklepowe promocje, nic więcej pod kątem rekrutacji."
     },
     {
       "role": "user",
-      "content": "Hmm..."
+      "content": "[po \"Hey Jarvis\"] Wejdź mi na YouTube, na operze GX."
     },
     {
       "role": "assistant",
-      "content": "..."
+      "content": "Otworzyłem YouTube'a, mistrzu."
     },
     {
       "role": "user",
-      "content": "Najbardziej mi się podoba ta godzina, data, Jarvis system online, you just write a very intelligent system. Tryb słucham, eskip schowa, F11 okno. Pokazuję mi ile jest życia RAMu, CPU."
+      "content": "[po \"Hey Jarvis\"] Włącz album Riot, to jest przez 2T"
     },
     {
       "role": "assistant",
-      "content": "Słucham, mistrzu. Coś konkretnego mam dla ciebie sprawdzić czy odpalić?"
+      "content": "Lecimy z RIOTT, mistrzu."
     },
     {
       "role": "user",
-      "content": "Nie, teraz mnie nie słuchaj, nie aktywuj się w ogóle. Jak coś będę chciał, to powiem Hej Jarvis."
+      "content": "[bez \"Hey Jarvis\"] Kto jest tego wykonawcą?"
     },
     {
       "role": "assistant",
-      "content": "Dobra, mistrzu, czekam w ciszy."
+      "content": "Wykonawcą jest Otsochodzi, mistrzu."
     },
     {
       "role": "user",
-      "content": "Jakby co zrobić? Jakby co zrobić?"
+      "content": "[bez \"Hey Jarvis\"] To zapamiętaj sobie, że to jest mój ulubiony wykonawca i ulubiony album"
     },
     {
       "role": "assistant",
-      "content": "..."
+      "content": "Zapamiętane, mistrzu."
     }
   ],
-  "zapisano": "2026-09-19T20:17:24"
+  "zapisano": "2026-09-26T15:11:34"
 }
