@@ -135,6 +135,29 @@ def komunikat_braku(funkcja):
             "potem Ustawienia).")
 
 
+# TRYB SŁUCHAWEK — przełącznik w menu ikony przy zegarku ("Tryb słuchawek").
+#
+# Normalnie przerwać Jarvisowi można tylko słowami "Hey Jarvis": przez
+# głośniki mikrofon słyszy też jego głos, więc reakcja na KAŻDĄ mowę
+# kończyłaby się tym, że Jarvis ucisza sam siebie. Na słuchawkach mikrofon
+# go nie słyszy — wtedy wystarczy zacząć mówić, jak w rozmowie z człowiekiem.
+# Włączony przy głośnikach: Jarvis będzie milkł po pierwszych słowach.
+#
+# Zapisywany w config.env jak klucze; w .env działa też JARVIS_TRYB_SLUCHAWEK=1.
+TRYB_SLUCHAWEK = "JARVIS_TRYB_SLUCHAWEK"
+
+
+def tryb_sluchawek():
+    """Czy przerywa każda mowa (True), czy tylko "Hey Jarvis" (False)."""
+    return wartosc(TRYB_SLUCHAWEK).strip().lower() in ("1", "tak", "true", "on")
+
+
+def ustaw_tryb_sluchawek(wlaczony):
+    """Włącza albo wyłącza tryb słuchawek — działa od następnej odpowiedzi."""
+    zapisz({TRYB_SLUCHAWEK: "1" if wlaczony else "0"})
+    logger.info("Tryb słuchawek: %s.", "włączony" if wlaczony else "wyłączony")
+
+
 def zapisz(zmiany):
     """
     Zapisuje zmiany w %APPDATA%\\Jarvis\\config.env i od razu ustawia je
@@ -145,7 +168,8 @@ def zapisz(zmiany):
     os.makedirs(KATALOG, exist_ok=True)
     if not os.path.exists(PLIK):
         with open(PLIK, "w", encoding="utf-8") as plik:
-            plik.write("# Klucze Jarvisa — zapisuje je kreator i okno Ustawień.\n")
+            plik.write("# Klucze i ustawienia Jarvisa — zapisuje je kreator, okno Ustawień\n"
+                       "# i menu ikony przy zegarku.\n")
 
     for zmienna, nowa in zmiany.items():
         nowa = (nowa or "").strip()

@@ -64,7 +64,9 @@ dopiero PO odpowiedzi, której miało zapobiec. Teraz:
 
 "stop" ustawia flagę przerwania bieżącej odpowiedzi (agent przestaje
 generować, nic więcej nie zostaje wysłane) i wyrzuca z kolejki to, co
-jeszcze czekało. W historii rozmowy zostaje ślad, że odpowiedź przerwano.
+jeszcze czekało. W historii rozmowy zostaje ślad, że odpowiedź przerwano,
+a to, co Jarvis zdążył przygotować, czeka osobno — napisz "dokończ",
+a podejmie wątek (tak samo jak przy wejściu w słowo na głos, agent.py).
 """
 
 import io
@@ -195,6 +197,9 @@ class MostTelegram:
         self._pomijane = set(pomijane_zdania)
 
         self._historia = []
+        # Niewypowiedziana reszta odpowiedzi przerwanej przez "stop" — trzymana
+        # osobno od historii (opis w agent.py, przy _notatka_o_reszcie).
+        self._reszta = None
         self._oczekujace = None      # (polecenie, od_kiedy) — czeka na "tak"
         self._offset = None
         self._zatrzymaj = threading.Event()
@@ -468,7 +473,7 @@ class MostTelegram:
 
         zdania, stan = [], {}
         for element in self._odpowiedz(tekst, list(self._historia), True, "telegram",
-                                       przerwanie=przerwanie):
+                                       przerwanie=przerwanie, przerwana_reszta=self._reszta):
             if isinstance(element, dict):
                 stan.update(element)
             elif element not in self._pomijane:
@@ -476,11 +481,19 @@ class MostTelegram:
 
         if przerwanie.is_set():
             # "stop" przyszło, zanim cokolwiek wysłaliśmy: nic nie wysyłamy,
-            # a w historii zostaje ślad, że odpowiedź przerwano.
+            # a w historii zostaje ślad, że odpowiedź przerwano. To, co agent
+            # zdążył przygotować, nie przepada — czeka na "dokończ".
+            niewyslane = " ".join(zdania + [stan.get("niedokonczone") or ""]).strip()
+            if niewyslane:
+                self._reszta = {"tekst": niewyslane, "niepelna": bool(stan.get("przerwane")),
+                                "z_poczty": bool(stan.get("poczta")),
+                                "kiedy": time.monotonic()}
             self._zapamietaj(tekst, PRZERWANA_ODPOWIEDZ)
             return
 
         odpowiedz = " ".join(zdania).strip()
+        if odpowiedz:
+            self._reszta = None     # odpowiedź poszła — stara reszta nieaktualna
         self._zapamietaj(tekst, odpowiedz)
         polecenie = stan.get("system")
 

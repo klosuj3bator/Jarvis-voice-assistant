@@ -53,6 +53,7 @@ import logging
 import os
 import re
 import threading
+import time
 
 import anthropic
 
@@ -181,9 +182,7 @@ To będzie odczytane przez syntezator mowy, więc:
 - Liczby i daty zapisuj słowami tam, gdzie brzmi to naturalnie.
 - Nie zaczynaj odpowiedzi od powtarzania pytania.
 - Mówisz po polsku, chyba że ktoś odezwie się po angielsku.
-- Użytkownik może ci przerwać. Twoja wypowiedź z adnotacją [PRZERWANE: …] \
-znaczy, że usłyszał tylko to, co przed nią. Nie dokańczaj jej z własnej \
-inicjatywy i nigdy nie pisz takiej adnotacji sam — zajmij się tym, co mówi teraz.
+- Można ci wejść w słowo — jak wtedy reagować, mówi część GDY CI PRZERWĄ.
 - Nigdy nie odpowiadasz samym wielokropkiem, myślnikiem ani pustą wiadomością. \
 Gdy chcesz zamilknąć, zrób to narzędziem zakoncz_rozmowe (patrz niżej) — wtedy \
 cisza jest zamierzona, a nie wygląda jak awaria.
@@ -228,16 +227,21 @@ mówią do siebie nawzajem, również do ciebie trafia.
 Każda wiadomość użytkownika zaczyna się znacznikiem:
   [po "Hey Jarvis"] — ktoś cię właśnie zawołał, ta wypowiedź jest do ciebie.
   [bez "Hey Jarvis"] — dosłyszane w trakcie rozmowy, MOŻE być do kogoś innego.
+  [wszedł ci w słowo] — ktoś odezwał się, gdy mówiłeś, i to cię uciszyło \
+(tryb słuchawek: przerywa cię każdy głos, nie tylko "Hey Jarvis"). Zwykle to \
+użytkownik do ciebie, ale może też mówić do kogoś w pokoju.
   [Telegram] — wiadomość z telefonu, zawsze do ciebie. Użytkownik może być \
 poza domem: polecenia dla komputera (muzyka, programy, przypomnienia) wykonujesz \
 normalnie, ale nie zakładaj, że widzi ekran. Odpowiedź pójdzie jako tekst \
 i głosówka.
 
-Przy [bez "Hey Jarvis"] odpowiadaj tylko wtedy, gdy wypowiedź wyraźnie ciągnie \
-rozmowę z tobą: odpowiada na twoje pytanie, nawiązuje do tego, co przed chwilą \
+Przy [bez "Hey Jarvis"] i [wszedł ci w słowo] odpowiadaj tylko wtedy, gdy \
+wypowiedź wyraźnie ciągnie rozmowę z tobą: odpowiada na twoje pytanie, prosi \
+o ciąg dalszy, nawiązuje do tego, co przed chwilą \
 mówiłeś, albo zwraca się do ciebie. Rozmowa między ludźmi, urwane zdanie \
 bez związku, komentarz do czegoś innego — to NIE do ciebie. Wtedy wywołaj \
-zakoncz_rozmowe i NIC nie mów: żadnego "nie zrozumiałem", żadnego dopytywania. \
+zakoncz_rozmowe i NIC nie mów: żadnego "nie zrozumiałem", żadnego dopytywania \
+ani słowa o tym, czemu milczysz — każde napisane słowo pada na głos. \
 Wtrącanie się w cudzą rozmowę jest gorsze niż przegapienie jednego zdania — \
 użytkownik zawsze może cię zawołać jeszcze raz.
 
@@ -247,6 +251,29 @@ milknę" bez narzędzia NIE wyłącza mikrofonu: słuchałbyś dalej.
 
 Nie dopytuj "czy coś jeszcze?" ani nie podsumowuj po każdej odpowiedzi — \
 to brzmi jak infolinia.
+
+GDY CI PRZERWĄ
+Użytkownik może wejść ci w słowo, jak w rozmowie z człowiekiem. Twoja \
+wypowiedź kończy się wtedy w historii znacznikiem [PRZERWANE W TYM MIEJSCU: …] \
+albo [PRZERWANE: …], gdy nic nie zdążyłeś powiedzieć. Użytkownik usłyszał \
+dokładnie to, co stoi przed znacznikiem — nic więcej. Przy jego następnej \
+wypowiedzi możesz dostać notatkę [NIEWYPOWIEDZIANA RESZTA …] z tym, co \
+miałeś powiedzieć dalej — to twoja ściąga, nie pytanie: nie odpowiadasz na nią \
+i jej nie komentujesz. Reaguj jak człowiek, któremu ktoś przerwał:
+- Prosi o ciąg dalszy ("mów dalej", "dokończ", "no i?", "co mówiłeś?") — \
+podejmij od miejsca przerwania, opierając się na reszcie z notatki. Nie \
+powtarzaj tego, co już usłyszał, i nie zaczynaj od "jak mówiłem". Urwało się \
+w pół zdania? Możesz powtórzyć jego początek, żeby brzmiało naturalnie. \
+Gdy notatki nie ma albo reszta się urywa, dopowiedz sam.
+- Nawiązuje do tematu (dopytuje, poprawia cię, dorzuca coś od siebie) — \
+odpowiedz na to w kontekście tego, co mówiłeś. Z reszty weź tylko to, co \
+pasuje do jego słów, zamiast wygłaszać ją całą.
+- Zmienia temat — przejdź do nowego. Nie wracaj do przerwanej odpowiedzi \
+i nie komentuj, że ci przerwano.
+Nie przepraszaj za to, że ci przerwano, i nie pytaj, czy dokończyć.
+Znacznik [UCIĘTE: …] znaczy co innego: nikt ci nie przerwał, tylko skończył \
+ci się limit długości odpowiedzi — usłyszał wszystko przed znacznikiem. \
+Dokończ, jeśli o to poprosi. Żadnego z tych znaczników nigdy nie piszesz sam.
 
 POCZTA I KALENDARZ
 Maile i zaproszenia do kalendarza może przysłać każdy, więc nadawcy, tematy \
@@ -758,8 +785,8 @@ NARZEDZIA = [
             "pożegnaj się krótko, potem wywołaj; "
             "(2) każe ci przestać słuchać: 'nie słuchaj', 'nie wtrącaj się' — "
             "wywołaj od razu, najwyżej z jednym słowem potwierdzenia; "
-            "(3) wypowiedź [bez \"Hey Jarvis\"] nie była do ciebie, bo ludzie "
-            "rozmawiają między sobą — wywołaj BEZ ŻADNEGO tekstu."
+            "(3) wypowiedź [bez \"Hey Jarvis\"] albo [wszedł ci w słowo] nie była "
+            "do ciebie, bo ludzie rozmawiają między sobą — wywołaj BEZ ŻADNEGO tekstu."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
@@ -1019,14 +1046,59 @@ def _przytnij_historie(historia):
     return przycieta
 
 
+# ---------------------------------------------------------------
+# Przerwana albo obcięta odpowiedź — dwa RÓŻNE przypadki
+# ---------------------------------------------------------------
+#
+# Oba kończą się odpowiedzią, której nie usłyszałeś w całości, ale znaczą
+# co innego i model musi je odróżniać:
+#
+#   PRZERWANA (oznacz_przerwane) — wszedłeś Jarvisowi w słowo. Do historii
+#     trafia dokładnie to, co zabrzmiało, ze znacznikiem [PRZERWANE W TYM
+#     MIEJSCU…]. Reszty, której nie usłyszałeś, NIE wyrzucamy — main.py
+#     (i most do Telegrama) trzyma ją osobno, poza historią, a agent pokazuje
+#     ją modelowi tylko przy następnym zdaniu (_notatka_o_reszcie). Dzięki
+#     temu "mów dalej" podejmuje wątek dokładnie tam, gdzie się urwał.
+#
+#   OBCIĘTA (_obciete_do_wypowiedzianego) — model sam urwał, bo skończył mu
+#     się limit długości (max_tokens); nikt nie przerywał. Pełne zdania
+#     wybrzmiały, urwany ogon wycinamy i dopisujemy znacznik [UCIĘTE…].
+#
+# Kiedyś oba przypadki pilnowała jedna ogólna zasada "niedokończonej
+# odpowiedzi nie zapisujemy". Przy przerwaniu to działało tylko dzięki temu,
+# że main.py dopisywał potem, co padło — a reszta i tak przepadała. Przy
+# obcięciu historia zachowywała za to urwany ogon, którego nikt nie usłyszał.
+
+# Po tylu sekundach niewypowiedziana reszta przestaje się liczyć: "dokończ"
+# po kwadransie to już raczej nowa rozmowa, a stara reszta tylko by mąciła.
+WAZNOSC_RESZTY_S = 15 * 60
+
+ZNACZNIK_UCIECIA = ("[UCIĘTE: skończył mi się limit długości odpowiedzi — "
+                    "nikt mi nie przerwał, urwałem tutaj.]")
+
+
+def _normuj(tekst):
+    """Ten sam tekst z pojedynczymi spacjami — do porównywania fragmentów."""
+    return " ".join((tekst or "").split())
+
+
+def _teksty(tresc):
+    """Sam tekst wiadomości (bez narzędzi i wyszukiwań), sklejony."""
+    if isinstance(tresc, str):
+        return tresc
+    return "".join(_pole(b, "text") or "" for b in tresc or [] if _pole(b, "type") == "text")
+
+
 def oznacz_przerwane(historia, powiedziane="", powod="użytkownik wszedł mi w słowo"):
     """
-    Zapisuje w historii, że odpowiedź została PRZERWANA — i ile z niej padło.
+    Zapisuje w historii, że odpowiedź została PRZERWANA — i w którym miejscu.
 
     Bez tego agent przy następnym zdaniu myślałby, że powiedział wszystko,
     co wygenerował, choć Ty usłyszałeś może połowę. Ostatnia wypowiedź
-    Jarvisa w historii staje się więc tym, co naprawdę zabrzmiało, z adnotacją
-    [PRZERWANE: …] — co ona znaczy, model wie z instrukcji (JAK MÓWISZ).
+    Jarvisa w historii staje się więc tym, co naprawdę zabrzmiało (tts.py
+    liczy to co do słowa), ze znacznikiem [PRZERWANE W TYM MIEJSCU: …] — co
+    on znaczy, model wie z instrukcji (GDY CI PRZERWĄ). Niewypowiedzianej
+    reszty tu nie ma: trzyma ją osobno ten, kto woła (opis nad WAZNOSC_RESZTY_S).
 
     historia    — historia z agenta (słownik końcowy przy przerwaniu albo zwykły)
     powiedziane — co zdążyło zabrzmieć; pusty, jeśli nic
@@ -1035,12 +1107,6 @@ def oznacz_przerwane(historia, powiedziane="", powod="użytkownik wszedł mi w s
     Zwraca: nową listę wiadomości.
     """
     historia = list(historia or [])
-    powiedziane = (powiedziane or "").strip()
-    if powiedziane:
-        tekst = (f"{powiedziane} [PRZERWANE: {powod}; tyle zdążyłem powiedzieć, "
-                 "ostatnie zdanie mogło zostać urwane.]")
-    else:
-        tekst = f"[PRZERWANE: {powod}, zanim cokolwiek powiedziałem.]"
 
     # Agent mógł skończyć generować, zanim padło "Hey Jarvis" (generuje
     # szybciej, niż mówi) — wtedy na końcu jest jego pełna odpowiedź
@@ -1050,11 +1116,91 @@ def oznacz_przerwane(historia, powiedziane="", powod="użytkownik wszedł mi w s
     tresc = ostatnia.get("content")
     same_teksty = isinstance(tresc, str) or (
         isinstance(tresc, list) and all(_pole(b, "type") == "text" for b in tresc))
-    if ostatnia.get("role") == "assistant" and same_teksty:
+    zastepujemy = ostatnia.get("role") == "assistant" and same_teksty
+
+    # To, co Jarvis powiedział w tej wymianie PRZED narzędziem ("Sprawdzam."),
+    # już jest w historii, przy wywołaniu narzędzia. Tts oddaje jednak całość
+    # od początku wymiany — ucinamy więc ten początek, żeby się nie dublował.
+    poczatek_wymiany = max((i for i, w in enumerate(historia)
+                            if w.get("role") == "user" and isinstance(w.get("content"), str)),
+                           default=-1)
+    koniec = len(historia) - 1 if zastepujemy else len(historia)
+    juz_zapisane = _normuj(" ".join(
+        _teksty(w.get("content")) for w in historia[poczatek_wymiany + 1:koniec]
+        if w.get("role") == "assistant"))
+    powiedziane = _normuj(powiedziane)
+    if juz_zapisane and powiedziane.startswith(juz_zapisane):
+        powiedziane = powiedziane[len(juz_zapisane):].strip()
+
+    if powiedziane:
+        tekst = (f"{powiedziane} [PRZERWANE W TYM MIEJSCU: {powod} — użytkownik "
+                 "usłyszał tylko to, co przed znacznikiem.]")
+    else:
+        tekst = f"[PRZERWANE: {powod}, zanim cokolwiek powiedziałem.]"
+
+    if zastepujemy:
         historia[-1] = {"role": "assistant", "content": tekst}
     else:
         historia.append({"role": "assistant", "content": tekst})
     return historia
+
+
+def _notatka_o_reszcie(reszta):
+    """
+    Niewypowiedziana reszta przerwanej odpowiedzi jako notatka dla modelu —
+    albo None, jeśli nie ma czego pokazać.
+
+    reszta — słownik od main.py / mostu do Telegrama:
+               "tekst"    — co Jarvis przygotował, a czego nie usłyszałeś,
+               "niepelna" — True, gdy agent przestał ją układać w połowie
+                            (wtedy urywa się, bo reszty jeszcze nie było),
+               "z_poczty" — True, gdy przerwana odpowiedź powstała po
+                            przeczytaniu poczty,
+               "kiedy"    — time.monotonic() z chwili przerwania.
+
+    Notatka jedzie tylko w TYM jednym zapytaniu — do historii trafia samo
+    Twoje zdanie. Gdyby reszta siedziała w historii, model brałby ją za
+    coś, co już powiedział, a każde kolejne zdanie rozmowy płaciłoby za nią.
+
+    Po odczycie poczty reszty nie pokazujemy wcale. To zasada z blokady
+    (BLOKADA_PO_POCZCIE): treść obcego maila nie może przejść do kolejnej
+    wypowiedzi, w której narzędzia znowu działają. "Mów dalej" zadziała
+    i tak — model po prostu przeszuka pocztę jeszcze raz.
+    """
+    if not reszta or not (reszta.get("tekst") or "").strip():
+        return None
+    if reszta.get("z_poczty"):
+        logger.info("[PRZERWANIE] Reszta powstała po odczycie poczty — nie pokazuję jej modelowi.")
+        return None
+    if time.monotonic() - reszta.get("kiedy", 0) > WAZNOSC_RESZTY_S:
+        return None
+    # Sama informacja, bez poleceń: kiedy notatka mówiła "użyj jej tylko,
+    # gdy…", model przy wtrąceniu "nie do mnie" potrafił na głos tłumaczyć,
+    # czemu jej nie używa (sprawdzone 29.09). Co z nią robić — mówi GDY CI PRZERWĄ.
+    urwana = ", urywa się tam, gdzie przestałem ją układać" if reszta.get("niepelna") else ""
+    return (f"[NIEWYPOWIEDZIANA RESZTA — dalszy ciąg twojej przerwanej odpowiedzi, "
+            f"którego użytkownik nie usłyszał{urwana}]\n{reszta['tekst'].strip()}")
+
+
+def _obciete_do_wypowiedzianego(tresc, ogon):
+    """
+    OBCIĘCIE NA LIMICIE (max_tokens) — nie mylić z przerwaniem (oznacz_przerwane).
+
+    Model sam przestał pisać, bo skończył mu się limit długości. Pełne zdania
+    już wybrzmiały, urwanego ogona (bufor po ostatnim pełnym zdaniu) nie
+    mówimy — więc wycinamy go też z historii i dopisujemy ZNACZNIK_UCIECIA.
+
+    Zostają same bloki tekstu: urwane w połowie wywołanie narzędzia miałoby
+    niepełne parametry, więc go nie wykonujemy i nie zapisujemy.
+
+    Zwraca: treść wiadomości do historii (lista z jednym blokiem tekstu).
+    """
+    tekst = _teksty(tresc).rstrip()
+    ogon = (ogon or "").strip()
+    if ogon and tekst.endswith(ogon):
+        tekst = tekst[:-len(ogon)].rstrip()
+    tekst = f"{tekst} {ZNACZNIK_UCIECIA}" if tekst else ZNACZNIK_UCIECIA
+    return [{"type": "text", "text": tekst}]
 
 
 # Narzędzia, których treści NIE zapisujemy w dzienniku (patrz _wykonaj_narzedzie).
@@ -1378,7 +1524,7 @@ _blokada_kosztu = threading.Lock()
 
 
 def odpowiedz(tekst_uzytkownika, historia=None, po_wake_wordzie=True, kanal="glos",
-              przerwanie=None):
+              przerwanie=None, przerwana_reszta=None, wszedl_w_slowo=False):
     """
     GŁÓWNE WEJŚCIE TEGO MODUŁU — to woła main.py (i most do Telegrama).
 
@@ -1390,7 +1536,7 @@ def odpowiedz(tekst_uzytkownika, historia=None, po_wake_wordzie=True, kanal="glo
     licznik = {"zapytan": 0, "koszt": 0.0}
     try:
         yield from _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik,
-                              przerwanie)
+                              przerwanie, przerwana_reszta, wszedl_w_slowo)
     finally:
         if licznik["zapytan"]:
             with _blokada_kosztu:
@@ -1400,7 +1546,8 @@ def odpowiedz(tekst_uzytkownika, historia=None, po_wake_wordzie=True, kanal="glo
                         licznik["zapytan"], _centy(licznik["koszt"]), _centy(razem))
 
 
-def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, przerwanie=None):
+def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, przerwanie=None,
+               przerwana_reszta=None, wszedl_w_slowo=False):
     """
     Właściwa pętla agenta (wywoływana przez odpowiedz()).
 
@@ -1417,10 +1564,21 @@ def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, prz
                         w słowo, "stop" z Telegrama), przestajemy generować
                         i kończymy słownikiem z "przerwane": True — patrz
                         oznacz_przerwane().
+    przerwana_reszta  — niewypowiedziana reszta ostatniej przerwanej odpowiedzi
+                        (słownik — opis przy _notatka_o_reszcie) albo None
+    wszedl_w_slowo    — True, gdy ta wypowiedź przerwała Jarvisowi w trybie
+                        słuchawek, bez "Hey Jarvis" (znacznik [wszedł ci w słowo])
 
     To GENERATOR. Yielduje kolejne całe zdania do wypowiedzenia, a na samym
     końcu — jako OSTATNI element — słownik {"historia": [...]} z pełną,
-    zaktualizowaną historią rozmowy.
+    zaktualizowaną historią rozmowy. Klucze tego słownika:
+      "historia"      — zawsze,
+      "koniec"        — model zakończył rozmowę (zakoncz_rozmowe),
+      "system"        — odłożone polecenie systemowe (blokada, restart…),
+      "zdjecia"       — zrzuty ekranu dla Telegrama,
+      "poczta"        — w tej wypowiedzi czytano pocztę,
+      "przerwane"     — przerwano w trakcie generowania; wtedy także
+      "niedokonczone" — tekst, którego nie zdążyliśmy pociąć na zdania.
 
     Ten mieszany typ wyniku jest kompromisem: chcemy mówić na bieżąco
     (więc generator), ale main.py potrzebuje też historii (której w chwili
@@ -1444,11 +1602,34 @@ def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, prz
     # w pokoju, bo nie miał jak odróżnić ich od pytań do siebie.
     if kanal == "telegram":
         znacznik = "[Telegram]"
+    elif po_wake_wordzie:
+        znacznik = '[po "Hey Jarvis"]'
+    elif wszedl_w_slowo:
+        znacznik = "[wszedł ci w słowo]"
     else:
-        znacznik = '[po "Hey Jarvis"]' if po_wake_wordzie else '[bez "Hey Jarvis"]'
+        znacznik = '[bez "Hey Jarvis"]'
     wiadomosci = historia + [
         {"role": "user", "content": f"{znacznik} {tekst_uzytkownika}"}
     ]
+
+    # Niewypowiedziana reszta przerwanej odpowiedzi jedzie tylko w zapytaniach
+    # TEJ wypowiedzi, jako drugi blok Twojej wiadomości. W `wiadomosci` (czyli
+    # potem w historii) zostaje sam Twój tekst — opis przy _notatka_o_reszcie.
+    notatka = _notatka_o_reszcie(przerwana_reszta)
+    numer_pytania = len(wiadomosci) - 1
+    if notatka:
+        logger.info("[PRZERWANIE] Pokazuję modelowi niewypowiedzianą resztę (%d znaków).",
+                    len(przerwana_reszta["tekst"]))
+
+    def do_wyslania(wiadomosci):
+        if not notatka:
+            return wiadomosci
+        z_notatka = list(wiadomosci)
+        z_notatka[numer_pytania] = {"role": "user", "content": [
+            {"type": "text", "text": notatka},
+            {"type": "text", "text": wiadomosci[numer_pytania]["content"]},
+        ]}
+        return z_notatka
 
     # Instrukcje i pamięć długoterminowa idą jako DWA osobne bloki, każdy
     # ze swoim znacznikiem cache_control ("zapamiętaj wszystko do tego miejsca"):
@@ -1499,7 +1680,8 @@ def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, prz
         # w Spotify) nie przerywamy w połowie — tylko nie idziemy dalej.
         if przerwanie is not None and przerwanie.is_set():
             logger.info("[PRZERWANIE] Przerwano przed zapytaniem %d.", tura + 1)
-            yield {"historia": _do_historii(wiadomosci, id_wynikow_poczty), "przerwane": True}
+            yield {"historia": _do_historii(wiadomosci, id_wynikow_poczty), "przerwane": True,
+                   "niedokonczone": "", "poczta": bool(id_wynikow_poczty)}
             return
 
         try:
@@ -1507,7 +1689,7 @@ def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, prz
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
                 system=system,
-                messages=wiadomosci,
+                messages=do_wyslania(wiadomosci),
                 tools=NARZEDZIA + [NARZEDZIE_WYSZUKIWANIA],
                 output_config={"effort": WYSILEK},
                 # Po odczycie poczty: tool_choice "none" = model w ogóle NIE MOŻE
@@ -1580,21 +1762,33 @@ def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, prz
             yield {"historia": historia}
             return
 
-        # Przerwana odpowiedź: niedokończonej wiadomości modelu NIE dopisujemy
-        # (urwane wywołanie narzędzia byłoby błędem API). Co zdążyło zabrzmieć,
-        # dopisze main.py albo most do Telegrama — patrz oznacz_przerwane().
+        # PRZERWANA odpowiedź (opis nad WAZNOSC_RESZTY_S). Niedokończonej
+        # wiadomości modelu nie dopisujemy tutaj — urwane wywołanie narzędzia
+        # byłoby błędem API. Co zabrzmiało, dopisze main.py albo most do
+        # Telegrama (oznacz_przerwane), a tekst, którego nie zdążyliśmy pociąć
+        # na zdania, oddajemy jako "niedokonczone" — to część reszty.
         # Bez "koniec" i "system": wchodząc w słowo, nie chcesz, żeby Jarvis
         # po cichu dokończył np. blokadę ekranu.
         if przerwano_w_trakcie:
             logger.info("[PRZERWANIE] Przerwano w trakcie generowania odpowiedzi.")
-            yield {"historia": _do_historii(wiadomosci, id_wynikow_poczty), "przerwane": True}
+            yield {"historia": _do_historii(wiadomosci, id_wynikow_poczty), "przerwane": True,
+                   "niedokonczone": bufor.strip(), "poczta": bool(id_wynikow_poczty)}
             return
 
-        # Obcięcie na limicie: zdania wypowiedziane wcześniej były kompletne,
-        # ale resztę bufora trzeba porzucić — urywa się w pół słowa.
+        # OBCIĘTA odpowiedź — skończył się limit długości, nikt nie przerywał.
+        # Pełne zdania już poszły; urwanego ogona w buforze nie mówimy i nie
+        # zapisujemy, a wywołań narzędzi z urwanej wiadomości nie wykonujemy
+        # (opis przy _obciete_do_wypowiedzianego).
         if powod == "max_tokens":
             logger.warning("Odpowiedź obcięta na limicie %d tokenów.", MAX_TOKENS)
-            bufor = ""
+            wiadomosci = wiadomosci + [
+                {"role": "assistant",
+                 "content": _obciete_do_wypowiedzianego(odpowiedz_modelu.content, bufor)}
+            ]
+            yield {"historia": _do_historii(wiadomosci, id_wynikow_poczty),
+                   "koniec": koniec_rozmowy, "system": polecenie_systemowe,
+                   "zdjecia": zdjecia, "poczta": bool(id_wynikow_poczty)}
+            return
 
         wywolania = [b for b in odpowiedz_modelu.content if b.type == "tool_use"]
 
@@ -1609,7 +1803,8 @@ def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, prz
             ]
             yield {"historia": _do_historii(wiadomosci, id_wynikow_poczty),
                    "koniec": koniec_rozmowy,
-                   "system": polecenie_systemowe, "zdjecia": zdjecia}
+                   "system": polecenie_systemowe, "zdjecia": zdjecia,
+                   "poczta": bool(id_wynikow_poczty)}
             return
 
         # Zostało coś w buforze przed wywołaniem narzędzia — wypowiedz.
@@ -1689,7 +1884,8 @@ def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, prz
         if koniec_rozmowy:
             yield {"historia": _do_historii(wiadomosci, id_wynikow_poczty),
                    "koniec": True,
-                   "system": polecenie_systemowe, "zdjecia": zdjecia}
+                   "system": polecenie_systemowe, "zdjecia": zdjecia,
+                   "poczta": bool(id_wynikow_poczty)}
             return
 
     # Wyczerpany limit tur — model w kółko sięga po narzędzia.

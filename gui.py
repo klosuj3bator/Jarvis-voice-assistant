@@ -776,18 +776,24 @@ class TrayJarvisa:
         zabiłoby całą aplikację, mimo że ikona w zasobniku dalej by tam była.
     """
 
-    def __init__(self, app, okno, przy_zamknieciu=None, przy_ustawieniach=None):
+    def __init__(self, app, okno, przy_zamknieciu=None, przy_ustawieniach=None,
+                 czy_tryb_sluchawek=None, ustaw_tryb_sluchawek=None):
         """
-        app               — obiekt QApplication
-        okno              — pełnoekranowy HUD Jarvisa
-        przy_zamknieciu   — opcjonalna funkcja sprzątająca, wołana przed wyjściem
-                            (main.py przekazuje tu zatrzymanie wątku nasłuchu)
-        przy_ustawieniach — opcjonalna funkcja otwierająca okno Ustawień
-                            (setup_wizard.py); bez niej w menu nie ma tej pozycji
+        app                  — obiekt QApplication
+        okno                 — pełnoekranowy HUD Jarvisa
+        przy_zamknieciu      — opcjonalna funkcja sprzątająca, wołana przed wyjściem
+                               (main.py przekazuje tu zatrzymanie wątku nasłuchu)
+        przy_ustawieniach    — opcjonalna funkcja otwierająca okno Ustawień
+                               (setup_wizard.py); bez niej w menu nie ma tej pozycji
+        czy_tryb_sluchawek   — funkcja: czy tryb słuchawek jest włączony
+        ustaw_tryb_sluchawek — funkcja(True/False) zapisująca przełącznik
+                               (obie z konfiguracja.py; bez nich nie ma tej pozycji)
         """
         self._app = app
         self._okno = okno
         self._przy_zamknieciu = przy_zamknieciu
+        self._czy_tryb_sluchawek = czy_tryb_sluchawek
+        self._ustaw_tryb_sluchawek = ustaw_tryb_sluchawek
 
         # Bez tego schowanie HUD-a (ESC) zamknęłoby cały program.
         app.setQuitOnLastWindowClosed(False)
@@ -812,6 +818,17 @@ class TrayJarvisa:
             akcja_ustawienia = QAction("Ustawienia", self._menu)
             akcja_ustawienia.triggered.connect(przy_ustawieniach)
             self._menu.addAction(akcja_ustawienia)
+
+        # Tryb słuchawek (opis w konfiguracja.py): pozycja z "ptaszkiem".
+        # Przełącza się jednym kliknięciem, bez restartu — działa od
+        # następnej odpowiedzi Jarvisa.
+        self._akcja_sluchawki = None
+        if czy_tryb_sluchawek is not None and ustaw_tryb_sluchawek is not None:
+            self._akcja_sluchawki = QAction("Tryb słuchawek — przerywa każde słowo", self._menu)
+            self._akcja_sluchawki.setCheckable(True)
+            self._akcja_sluchawki.setChecked(czy_tryb_sluchawek())
+            self._akcja_sluchawki.toggled.connect(self._przelacz_sluchawki)
+            self._menu.addAction(self._akcja_sluchawki)
 
         self._menu.addSeparator()
 
@@ -842,6 +859,18 @@ class TrayJarvisa:
         self._akcja_widocznosc.setText(
             "Schowaj Jarvisa" if self._okno.isVisible() else "Pokaż Jarvisa"
         )
+
+    def _przelacz_sluchawki(self, wlaczony):
+        """Zapisuje przełącznik trybu słuchawek i mówi w dymku, co to zmienia."""
+        self._ustaw_tryb_sluchawek(wlaczony)
+        if wlaczony:
+            opis = ("Przerwiesz mi, po prostu zaczynając mówić. "
+                    "Tylko na słuchawkach — przez głośniki przerywałbym sam sobie.")
+        else:
+            opis = "Przerwiesz mi słowami „Hey Jarvis”."
+        self._tray.showMessage(
+            f"Tryb słuchawek {'włączony' if wlaczony else 'wyłączony'}", opis,
+            QSystemTrayIcon.Information, 4000)
 
     def _przelacz_widocznosc(self):
         """Pokazuje albo chowa HUD i aktualizuje napis w menu."""

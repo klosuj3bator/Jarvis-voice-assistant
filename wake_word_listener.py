@@ -1209,7 +1209,7 @@ def sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
 
 
 def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8, po_przerwaniu=False,
-                            poczatek=()):
+                            poczatek=(), mowa_trwa=False):
     """
     Nasłuchuje BEZ wymagania "Hey Jarvis" — to tryb trwającej rozmowy.
 
@@ -1223,6 +1223,10 @@ def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8, po_przerwaniu=Fa
                     zdań, a czekanie na nią byłoby czekaniem na samych siebie.
     poczatek      — ramki sprzed startu nagrywania, doklejane na jego początek
                     (przy wejściu w słowo: OGON_PO_WYKRYCIU_S)
+    mowa_trwa     — True w trybie słuchawek: przerwało samo mówienie, więc
+                    właśnie mówisz i od razu nagrywamy do ciszy. Czekanie na
+                    "początek mowy" zgubiłoby krótkie "stop" — zanim byśmy
+                    zaczęli czekać, już byś skończył.
 
     Różnica wobec sluchaj_komendy() jest dwojaka:
 
@@ -1252,6 +1256,20 @@ def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8, po_przerwaniu=Fa
     _przygotuj(orb_callback)
     vad = _przygotuj_vad()
 
+    ramek_na_sekunde = SAMPLE_RATE / DLUGOSC_RAMKI
+    limit_czekania = int(limit_ciszy_s * ramek_na_sekunde)
+    limit_ciszy_konczacej = int(CISZA_KONCZACA_S * ramek_na_sekunde)
+    limit_nagrania = int(MAX_WYPOWIEDZ_S * ramek_na_sekunde)
+    dlugosc_pre_bufora = max(1, int(PRE_BUFOR_S * ramek_na_sekunde))
+
+    # Tryb słuchawek: mówisz już teraz — od razu nagrywamy do ciszy. Stanu
+    # VAD-a nie zerujemy, bo właśnie śledzi Twoją trwającą wypowiedź.
+    if mowa_trwa:
+        zglos("listening")
+        logger.info("[ROZMOWA] Mówisz w trakcie odpowiedzi — nagrywam do ciszy...")
+        return _dokoncz_wypowiedz(list(poczatek), vad, zglos,
+                                  limit_ciszy_konczacej, limit_nagrania)
+
     # Stan VAD-a jest ciągły między wywołaniami (to sieć rekurencyjna),
     # więc przed każdą nową wypowiedzią zaczynamy od czystego licznika.
     vad.reset_states()
@@ -1259,12 +1277,6 @@ def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8, po_przerwaniu=Fa
         _oproznij_bufor()
 
     logger.info("[ROZMOWA] Słucham dalej, bez wake worda (max %s s ciszy)...", limit_ciszy_s)
-
-    ramek_na_sekunde = SAMPLE_RATE / DLUGOSC_RAMKI
-    limit_czekania = int(limit_ciszy_s * ramek_na_sekunde)
-    limit_ciszy_konczacej = int(CISZA_KONCZACA_S * ramek_na_sekunde)
-    limit_nagrania = int(MAX_WYPOWIEDZ_S * ramek_na_sekunde)
-    dlugosc_pre_bufora = max(1, int(PRE_BUFOR_S * ramek_na_sekunde))
 
     from collections import deque
     pre_bufor = deque(maxlen=dlugosc_pre_bufora)
@@ -1379,6 +1391,47 @@ def _dokoncz_wypowiedz(porcje, vad, zglos, limit_ciszy_konczacej, limit_nagrania
 
 # --- Wejście w słowo: "Hey Jarvis" w trakcie odpowiedzi -----------------------
 
+# TRYB SŁUCHAWEK (konfiguracja.tryb_sluchawek): przerywa każda mowa, nie tylko
+# "Hey Jarvis". Ile mowy wystarczy: RAMKI_MOWY_DO_PRZERWANIA ramek po 80 ms
+# spośród ostatnich OKNO_PRZERWANIA — 4 z 6 to ok. 0,3 s mowy w ciągu pół
+# sekundy. Kaszlnięcie czy stuknięcie są krótsze, a "stop" albo "czekaj" —
+# dłuższe. Jarvis milknie od "mhm"? Podnieś pierwszą liczbę do 5.
+RAMKI_MOWY_DO_PRZERWANIA = 4
+OKNO_PRZERWANIA = 6
+
+
+def _czekaj_na_mowe(stop, ogon):
+    """
+    Tryb słuchawek: czeka, aż ktoś zacznie mówić — zamiast na "Hey Jarvis".
+
+    stop — threading.Event kończący czekanie (Jarvis skończył mówić)
+    ogon — lista; po wykryciu dopisujemy do niej dźwięk od pół sekundy przed
+           początkiem mowy (PRE_BUFOR_S) — to początek Twojego polecenia
+
+    Na słuchawkach mikrofon nie słyszy Jarvisa, więc każdy wykryty głos to Ty
+    albo ktoś obok. Przez głośniki ta funkcja przerywałaby Jarvisa jego
+    własnym głosem — dlatego to osobny, świadomie włączany tryb.
+
+    Zwraca: True po wykryciu mowy, False gdy ustawiono `stop` albo program
+    się zamyka.
+    """
+    vad = _przygotuj_vad()
+    vad.reset_states()
+    ramek_przed = max(1, round(PRE_BUFOR_S * SAMPLE_RATE / DLUGOSC_RAMKI))
+    ostatnie = collections.deque(maxlen=ramek_przed + OKNO_PRZERWANIA)
+    mowa = collections.deque(maxlen=OKNO_PRZERWANIA)   # True/False dla każdej ramki
+
+    while not _zatrzymaj_sie.is_set() and not stop.is_set():
+        dane, _ = _stream.read(DLUGOSC_RAMKI)
+        pcm = dane.flatten()
+        ostatnie.append(pcm)
+        mowa.append(float(vad.predict(pcm, frame_size=RAMKA_VAD)) > PROG_VAD)
+        if sum(mowa) >= RAMKI_MOWY_DO_PRZERWANIA:
+            ogon.extend(ostatnie)
+            return True
+    return False
+
+
 class WejscieWSlowo:
     """
     Nasłuch "Hey Jarvis" przez cały czas, gdy Jarvis myśli i mówi.
@@ -1407,13 +1460,18 @@ class WejscieWSlowo:
     właśnie odtwarzane zdanie brzmi jak "Jarvis" (`co_mowie`), wykrycia
     pomijamy. "Hej Jarvis" innym głosem na tle mówiącego Jarvisa dawało
     0,26-0,45, czyli ponad próg — wejście w słowo działa nawet bez słuchawek.
+
+    kazda_mowa=True to tryb słuchawek: zamiast "Hey Jarvis" przerywa każdy
+    głos (_czekaj_na_mowe), a to, co mówisz, od razu staje się poleceniem.
     """
 
-    def __init__(self, na_wykrycie, co_mowie=None, callback_stanu=None, limit_ciszy_s=8):
+    def __init__(self, na_wykrycie, co_mowie=None, callback_stanu=None, limit_ciszy_s=8,
+                 kazda_mowa=False):
         self._na_wykrycie = na_wykrycie
         self._co_mowie = co_mowie or (lambda: "")
         self._callback_stanu = callback_stanu
         self._limit_ciszy_s = limit_ciszy_s
+        self._kazda_mowa = kazda_mowa
         self._stop = threading.Event()
         self._wykryto = threading.Event()
         self._polecenie = None
@@ -1421,7 +1479,7 @@ class WejscieWSlowo:
 
     def start(self):
         """Zaczyna nasłuch. Bez mikrofonu po prostu nic nie robi."""
-        if _stream is None or _detektor is None:
+        if _stream is None or (_detektor is None and not self._kazda_mowa):
             return
         self._watek = threading.Thread(target=self._praca, name="watek-wejscia-w-slowo",
                                        daemon=True)
@@ -1429,17 +1487,24 @@ class WejscieWSlowo:
 
     def _praca(self):
         try:
-            # Detektor pamięta ostatnie ramki sprzed tej odpowiedzi — zaczynamy czysto.
-            _detektor.reset()
             ogon = []
-            if not _czekaj_na_wake_word(pomijaj_gdy_zajety=False, stop=self._stop,
-                                        ignoruj=self._sam_sie_wolam, ogon=ogon):
-                return
+            if self._kazda_mowa:
+                if not _czekaj_na_mowe(self._stop, ogon):
+                    return
+                opis = "Ktoś mówi (tryb słuchawek)"
+            else:
+                # Detektor pamięta ostatnie ramki sprzed tej odpowiedzi — zaczynamy czysto.
+                _detektor.reset()
+                if not _czekaj_na_wake_word(pomijaj_gdy_zajety=False, stop=self._stop,
+                                            ignoruj=self._sam_sie_wolam, ogon=ogon):
+                    return
+                opis = "Usłyszałem 'Hey Jarvis'"
             self._wykryto.set()
-            logger.info("[WEJŚCIE W SŁOWO] Usłyszałem 'Hey Jarvis' — milknę i słucham.")
+            logger.info("[WEJŚCIE W SŁOWO] %s — milknę i słucham.", opis)
             self._na_wykrycie()
             self._polecenie = _sluchaj_bez_wake_worda(
-                self._callback_stanu, self._limit_ciszy_s, po_przerwaniu=True, poczatek=ogon)
+                self._callback_stanu, self._limit_ciszy_s, po_przerwaniu=True, poczatek=ogon,
+                mowa_trwa=self._kazda_mowa)
         except sd.PortAudioError as e:
             _mikrofon_utracony(e)
         except Exception:
@@ -1473,6 +1538,15 @@ class WejscieWSlowo:
         if self._watek is not None:
             self._watek.join()
         return self._polecenie
+
+    def wolano_jarvisa(self):
+        """
+        Czy przerwanie było na pewno skierowane do Jarvisa? Tak, gdy padło
+        "Hey Jarvis". W trybie słuchawek przerywa każdy głos — wtedy tylko
+        wtedy, gdy w samym poleceniu pada "Jarvis" (np. "Jarvis, stop").
+        Woła się po polecenie().
+        """
+        return not self._kazda_mowa or _brzmi_jak_jarvis(self._polecenie or "")
 
 
 def zamknij():

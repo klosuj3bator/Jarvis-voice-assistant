@@ -34,6 +34,7 @@ import queue
 import re
 import threading
 import time
+from dataclasses import dataclass
 
 import av
 import edge_tts
@@ -68,7 +69,7 @@ def _da_sie_wypowiedziec(tekst):
     return bool(tekst) and re.search(r"\w", tekst, re.UNICODE) is not None
 
 
-def _syntezuj(tekst):
+def _syntezuj(tekst, slowa=None):
     """
     Wysyła tekst do syntezatora Microsoftu i zwraca nagranie jako bajty MP3.
 
@@ -78,20 +79,29 @@ def _syntezuj(tekst):
     zdarzeń, czeka na komplet danych i zwraca gotowy wynik. Z zewnątrz ta
     funkcja wygląda jak każda inna — po prostu zwraca bajty.
 
+    slowa — opcjonalna lista; jeśli ją podasz, syntezator dopisze do niej
+            czasy słów: (początek w s, długość w s, słowo). Po nich przy
+            wejściu w słowo wiemy, na którym słowie Jarvis umilkł (patrz
+            _podziel_zdanie). Sprawdzone 29.09 na polskim głosie: czasy
+            przychodzą dla każdego słowa, także "grunge'u".
+
     Zwraca: bajty pliku MP3.
     """
 
     async def pobierz():
         komunikat = edge_tts.Communicate(
-            tekst, GLOS, rate=TEMPO, pitch=WYSOKOSC
+            tekst, GLOS, rate=TEMPO, pitch=WYSOKOSC,
+            boundary="WordBoundary" if slowa is not None else "SentenceBoundary",
         )
         bufor = bytearray()
-        # Strumień zawiera dwa rodzaje porcji: "audio" (dźwięk) oraz
-        # "WordBoundary" (znaczniki czasu słów, przydatne do napisów).
-        # Nas interesuje wyłącznie dźwięk.
+        # Strumień zawiera dwa rodzaje porcji: "audio" (dźwięk) oraz znaczniki
+        # czasu (słów albo zdań). Czasy podaje w setkach nanosekund.
         async for porcja in komunikat.stream():
             if porcja["type"] == "audio":
                 bufor.extend(porcja["data"])
+            elif porcja["type"] == "WordBoundary" and slowa is not None:
+                slowa.append((porcja["offset"] / 1e7, porcja["duration"] / 1e7,
+                              porcja["text"]))
         return bytes(bufor)
 
     return asyncio.run(pobierz())
@@ -185,16 +195,54 @@ def _przygotuj_audio(tekst):
     To ta część pracy, którą w mow_strumieniowo() wykonujemy Z WYPRZEDZENIEM,
     w tle, podczas gdy głośniki grają poprzednie zdanie.
 
-    Zwraca: (audio, częstotliwość) albo (None, None) przy błędzie.
+    Zwraca: (audio, częstotliwość, czasy słów) albo (None, None, None) przy błędzie.
     """
     try:
-        dane_mp3 = _syntezuj(tekst)
+        slowa = []
+        dane_mp3 = _syntezuj(tekst, slowa)
         if not dane_mp3:
-            return None, None
-        return _dekoduj_mp3(dane_mp3)
+            return None, None, None
+        audio, czestotliwosc = _dekoduj_mp3(dane_mp3)
+        return audio, czestotliwosc, slowa
     except Exception:
         logger.exception("Nie udało się przygotować dźwięku dla: %r", tekst)
-        return None, None
+        return None, None, None
+
+
+def _podziel_zdanie(zdanie, slowa, zagrane_s, dlugosc_s):
+    """
+    Dzieli zdanie przerwane w połowie na to, co usłyszałeś, i to, czego nie.
+
+    slowa     — czasy słów od syntezatora (patrz _syntezuj)
+    zagrane_s — ile sekund zdania zdążyło zagrać przed przerwaniem
+
+    Słowo liczy się jako usłyszane, gdy zabrzmiała co najmniej jego połowa.
+    Bez czasów słów (syntezator ich nie podał) dzielimy proporcjonalnie do
+    czasu, na granicy słowa — mniej dokładnie, ale lepiej niż nic.
+
+    Zwraca: (usłyszany początek, nieusłyszany koniec). Całe zdanie usłyszane
+    = drugi element pusty (sam koniec nagrania to cisza, więc przerwanie
+    w ostatniej chwili nie urywa niczego).
+    """
+    granica = 0
+    if slowa:
+        pozycja = 0
+        for poczatek, dlugosc, slowo in slowa:
+            miejsce = zdanie.find(slowo, pozycja)
+            if miejsce < 0:
+                continue    # syntezator zapisał słowo po swojemu — pomijamy je
+            if poczatek + dlugosc / 2 > zagrane_s:
+                break
+            pozycja = granica = miejsce + len(slowo)
+    elif dlugosc_s > 0:
+        granica = int(len(zdanie) * min(1.0, zagrane_s / dlugosc_s))
+        if granica < len(zdanie):
+            granica = max(zdanie.rfind(" ", 0, granica + 1), 0)
+
+    # Przecinek czy kropka zaraz za ostatnim słowem należą jeszcze do niego.
+    while granica < len(zdanie) and not zdanie[granica].isspace() and not zdanie[granica].isalnum():
+        granica += 1
+    return zdanie[:granica].strip(), zdanie[granica:].strip()
 
 
 # Ile gotowych zdań trzymamy w zapasie. 2 wystarczą: jedno gra, drugie czeka.
@@ -216,6 +264,21 @@ _aktualne_zdanie = ""
 def aktualne_zdanie():
     """Zdanie, które właśnie jest odtwarzane (pusty napis, gdy cisza)."""
     return _aktualne_zdanie
+
+
+@dataclass
+class Wypowiedz:
+    """
+    Wynik mow_strumieniowo(): co naprawdę zabrzmiało, a co nie.
+
+    powiedziane      — tekst, który wyszedł z głośników. Gdy przerwałeś
+                       w pół zdania, kończy się na ostatnim usłyszanym słowie.
+    niewypowiedziane — tekst gotowy do powiedzenia, którego nie usłyszałeś:
+                       koniec przerwanego zdania i zdania czekające w kolejce.
+                       Pusty, gdy wszystko wybrzmiało.
+    """
+    powiedziane: str = ""
+    niewypowiedziane: str = ""
 
 
 def mow_strumieniowo(generator_zdan, na_start=None, przerwanie=None):
@@ -284,8 +347,13 @@ def mow_strumieniowo(generator_zdan, na_start=None, przerwanie=None):
          nikt nie usłyszy), ale dalej pobiera z generatora, a agent sam
          przerywa generowanie, gdy zobaczy flagę.
 
-    Zwraca: pełny tekst WYPOWIEDZIANYCH zdań, sklejony spacjami. Przy
-    przerwaniu ostatnie z nich mogło zabrzmieć tylko częściowo.
+    Przy okazji liczymy, CO usłyszałeś. Każde zdanie z generatora dostaje
+    numer, więc wiadomo, które zagrało ostatnie, a które czekały. Zdanie
+    przerwane w połowie dzielimy po czasach słów (_podziel_zdanie) — agent
+    zapisze w historii dokładnie to, co padło, a resztę zachowa osobno
+    na wypadek "mów dalej" (agent.py, GDY CI PRZERWĄ).
+
+    Zwraca: Wypowiedz — co zabrzmiało, a co nie.
     """
     global _aktualne_zdanie
 
@@ -300,23 +368,32 @@ def mow_strumieniowo(generator_zdan, na_start=None, przerwanie=None):
     # Zwykłe None byłoby mylące, bo None może też oznaczać nieudaną syntezę.
     KONIEC = object()
 
+    # Wszystkie zdania z generatora, po kolei — numer zdania to indeks tutaj.
+    # Dopisuje wątek w tle, czytamy dopiero po jego zakończeniu.
+    przygotowane = []
+
     def producent():
         """Pobiera zdania z generatora, syntezuje je i wkłada do kolejki."""
         try:
             for zdanie in generator_zdan:
-                # Po przerwaniu tylko dojadamy generator (punkt 3 w opisie).
                 # Znaki przestankowe bez ani jednej litery pomijamy w ciszy —
                 # patrz _da_sie_wypowiedziec().
-                if przerwano() or not _da_sie_wypowiedziec(zdanie):
+                if not _da_sie_wypowiedziec(zdanie):
                     continue
-                audio, czestotliwosc = _przygotuj_audio(zdanie)
+                numer = len(przygotowane)
+                przygotowane.append(zdanie)
+                # Po przerwaniu tylko dojadamy generator (punkt 3 w opisie) —
+                # zdania trafiają do `przygotowane`, czyli do niewypowiedzianej reszty.
+                if przerwano():
+                    continue
+                audio, czestotliwosc, slowa = _przygotuj_audio(zdanie)
                 if audio is None:
                     # Jedno zdanie się nie udało — pomijamy je i mówimy dalej.
                     # Lepiej zgubić zdanie niż uciąć całą odpowiedź.
                     logger.warning("Pomijam zdanie, którego nie udało się zsyntezować.")
                     continue
                 if not przerwano():
-                    kolejka.put((zdanie, audio, czestotliwosc))
+                    kolejka.put((numer, zdanie, audio, czestotliwosc, slowa))
         except Exception:
             logger.exception("Błąd w wątku przygotowującym mowę")
         finally:
@@ -328,6 +405,8 @@ def mow_strumieniowo(generator_zdan, na_start=None, przerwanie=None):
     watek.start()
 
     wypowiedziane = []
+    ostatnie = -1          # numer ostatniego zdania, które zaczęło grać
+    nieuslyszany_koniec = ""   # koniec zdania przerwanego w połowie
     pierwsze = True
 
     # Zajmujemy usta na CAŁĄ wypowiedź, a nie na każde zdanie osobno —
@@ -343,7 +422,7 @@ def mow_strumieniowo(generator_zdan, na_start=None, przerwanie=None):
             if element is KONIEC or przerwano():
                 break
 
-            zdanie, audio, czestotliwosc = element
+            numer, zdanie, audio, czestotliwosc, slowa = element
 
             if pierwsze:
                 if na_start is not None:
@@ -351,11 +430,23 @@ def mow_strumieniowo(generator_zdan, na_start=None, przerwanie=None):
                 pierwsze = False
 
             _aktualne_zdanie = zdanie
+            ostatnie = numer
+            start = time.monotonic()
             sd.play(audio, czestotliwosc)
             if przerwano():
                 sd.stop()   # punkt 1 w opisie: przerwanie tuż przed startem zdania
             sd.wait()  # to tutaj funkcja pozostaje blokująca
+            zagrane_s = time.monotonic() - start
             _aktualne_zdanie = ""
+
+            if przerwano():
+                # sd.wait() wróciło, bo przerwij() uciszyło głośniki — ile
+                # z tego zdania zdążyło paść?
+                uslyszane, nieuslyszany_koniec = _podziel_zdanie(
+                    zdanie, slowa, zagrane_s, len(audio) / czestotliwosc)
+                if uslyszane:
+                    wypowiedziane.append(uslyszane)
+                break
 
             wypowiedziane.append(zdanie)
 
@@ -373,12 +464,22 @@ def mow_strumieniowo(generator_zdan, na_start=None, przerwanie=None):
     else:
         watek.join(timeout=5)
 
-    pelny_tekst = " ".join(wypowiedziane)
-    if pelny_tekst:
-        logger.info("Powiedziałem (%d zdań%s): %s", len(wypowiedziane),
-                    ", PRZERWANE" if przerwano() else "", pelny_tekst)
+    wynik = Wypowiedz(powiedziane=" ".join(wypowiedziane))
+    if przerwano():
+        # Czego nie usłyszałeś: koniec przerwanego zdania i wszystko po nim
+        # (także zdania, które producent dojadał już po przerwaniu).
+        reszta = przygotowane[ostatnie + 1:]
+        if nieuslyszany_koniec:
+            reszta = [nieuslyszany_koniec] + reszta
+        wynik.niewypowiedziane = " ".join(reszta)
 
-    return pelny_tekst
+    if wynik.powiedziane:
+        logger.info("Powiedziałem (%d zdań%s): %s", len(wypowiedziane),
+                    ", PRZERWANE" if wynik.niewypowiedziane else "", wynik.powiedziane)
+    if wynik.niewypowiedziane:
+        logger.info("Niewypowiedziane po przerwaniu: %d znaków.", len(wynik.niewypowiedziane))
+
+    return wynik
 
 
 def synteza_ogg(tekst):

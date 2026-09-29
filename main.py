@@ -59,6 +59,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 
 from PySide6.QtWidgets import QApplication
 
@@ -410,7 +411,14 @@ class _BudzikCtrlC:
         self._nadawanie.close()
 
 
-def _odpowiedz(orb, tekst, historia_rozmowy, po_wake_wordzie=True):
+# Niewypowiedziana reszta ostatniej przerwanej odpowiedzi (słownik — opis
+# w agent.py, przy _notatka_o_reszcie) albo None. Trzymana OSOBNO od historii
+# i poza funkcją rozmowa(): "Hey Jarvis, dokończ" ma zadziałać także wtedy,
+# gdy po przerwaniu rozmowa zdążyła się skończyć ciszą.
+_przerwana_reszta = None
+
+
+def _odpowiedz(orb, tekst, historia_rozmowy, po_wake_wordzie=True, wszedl_w_slowo=False):
     """
     Jedna wymiana zdań: agent myśli, Jarvis odpowiada, a na koniec
     wykonuje odłożone polecenie systemowe (blokada, restart...).
@@ -418,16 +426,27 @@ def _odpowiedz(orb, tekst, historia_rozmowy, po_wake_wordzie=True):
     Przez cały ten czas działa nasłuch "Hey Jarvis" — możesz wejść
     Jarvisowi w słowo (opis przy WEJŚCIE W SŁOWO niżej).
 
+    wszedl_w_slowo — ta wypowiedź przerwała poprzednią odpowiedź w trybie
+                     słuchawek, bez "Hey Jarvis" (znacznik dla modelu)
+
     Zwraca: (nowa historia, stan od agenta, czy kończyć rozmowę). Po przerwaniu
-    stan ma "przerwane": True i "polecenie" — to, co powiedziałeś po
-    "Hey Jarvis" (tekst, "" albo None, jak z sluchaj_bez_wake_worda).
+    stan ma "przerwane": True i:
+      "polecenie"  — to, co powiedziałeś, przerywając (tekst, "" albo None,
+                     jak z sluchaj_bez_wake_worda),
+      "do_jarvisa" — czy padło "Hey Jarvis" (albo "Jarvis" w poleceniu),
+      "uciete"     — czy przerwanie coś uciło (a nie padło już po odpowiedzi).
+    Bez przerwania stan ma dodatkowo "powiedzial": czy cokolwiek zabrzmiało.
     """
+    global _przerwana_reszta
+
     # WEJŚCIE W SŁOWO
     # ===============
-    # Nasłuch w osobnym wątku (WejscieWSlowo) na "Hey Jarvis" woła
-    # wejscie_w_slowo(): flaga każe agentowi przestać generować, a tts milknie
-    # w pół zdania. Ten sam wątek od razu nagrywa Twoje nowe polecenie.
+    # Nasłuch w osobnym wątku (WejscieWSlowo) na "Hey Jarvis" — a w trybie
+    # słuchawek na każdy głos — woła wejscie_w_slowo(): flaga każe agentowi
+    # przestać generować, a tts milknie w pół zdania. Ten sam wątek od razu
+    # nagrywa Twoje nowe polecenie.
     przerwanie = threading.Event()
+    kazda_mowa = konfiguracja.tryb_sluchawek()
 
     def wejscie_w_slowo():
         przerwanie.set()
@@ -439,13 +458,15 @@ def _odpowiedz(orb, tekst, historia_rozmowy, po_wake_wordzie=True):
         co_mowie=tts.aktualne_zdanie,
         callback_stanu=orb.set_state,
         limit_ciszy_s=LIMIT_CISZY_ROZMOWY_S if LIMIT_CISZY_ROZMOWY_S > 0 else 8,
+        kazda_mowa=kazda_mowa,
     )
     ucho.start()
 
     # MÓZG I RĘCE W JEDNYM. Agent sam decyduje, czy sięgnąć po narzędzie
     # (Spotify, aplikacje, wyszukiwarka, pamięć), czy po prostu odpowiedzieć.
     generator = agent.odpowiedz(tekst, historia_rozmowy, po_wake_wordzie,
-                                przerwanie=przerwanie)
+                                przerwanie=przerwanie, przerwana_reszta=_przerwana_reszta,
+                                wszedl_w_slowo=wszedl_w_slowo)
 
     # Agent oddaje zdania do wypowiedzenia, a na samym końcu — słownik
     # ze stanem rozmowy. Przechwytujemy go tutaj, zanim trafi
@@ -463,7 +484,7 @@ def _odpowiedz(orb, tekst, historia_rozmowy, po_wake_wordzie=True):
     # a nie już teraz — inaczej świeciłaby "mówię" przez te sekundy,
     # w których model jeszcze myśli, a z głośników nic nie leci.
     try:
-        wypowiedziane = tts.mow_strumieniowo(
+        wypowiedz = tts.mow_strumieniowo(
             tylko_zdania(), na_start=lambda: orb.set_state("speaking"),
             przerwanie=przerwanie,
         )
@@ -475,18 +496,43 @@ def _odpowiedz(orb, tekst, historia_rozmowy, po_wake_wordzie=True):
         historia_rozmowy = stan["historia"]
 
     if przerwano:
-        # "Hey Jarvis" mogło paść już po ostatnim zdaniu — agent skończył
-        # normalnie, ale i tak chcesz czegoś nowego. Traktujemy to tak samo.
         przerwanie.set()
-        logger.info("[JARVIS] (przerwane) %s", wypowiedziane or "—")
-        historia_rozmowy = agent.oznacz_przerwane(historia_rozmowy, wypowiedziane)
+        # Czego nie usłyszałeś: to, czego tts nie zdążył powiedzieć, plus
+        # tekst, którego agent nie zdążył jeszcze pociąć na zdania.
+        reszta = " ".join(t for t in (wypowiedz.niewypowiedziane, stan.get("niedokonczone"))
+                          if t)
+        uciete = bool(reszta) or bool(stan.get("przerwane"))
+        if uciete:
+            logger.info("[JARVIS] (przerwane) %s", wypowiedz.powiedziane or "—")
+            historia_rozmowy = agent.oznacz_przerwane(
+                historia_rozmowy, wypowiedz.powiedziane,
+                "ktoś zaczął mówić (tryb słuchawek)" if kazda_mowa
+                else "użytkownik wszedł mi w słowo")
+            # Resztę trzymamy osobno, do "mów dalej" (opis przy _przerwana_reszta).
+            # Przerwane, zanim cokolwiek przygotowałem? Zostaje poprzednia
+            # reszta — "dokończ" dotyczy wtedy raczej tamtej odpowiedzi.
+            if reszta:
+                _przerwana_reszta = {"tekst": reszta, "niepelna": bool(stan.get("przerwane")),
+                                     "z_poczty": bool(stan.get("poczta")),
+                                     "kiedy": time.monotonic()}
+        else:
+            # "Hey Jarvis" padło już po ostatnim słowie — odpowiedź wybrzmiała
+            # cała i tak zostaje w historii. Po prostu chcesz czegoś nowego.
+            logger.info("[JARVIS] %s", wypowiedz.powiedziane)
+            _przerwana_reszta = None
         # Żadnego "koniec" ani odłożonej blokady czy wyłączenia — przerywając,
         # nie chcesz, żeby Jarvis po cichu dokończył to, co zapowiadał.
-        stan = {"przerwane": True, "polecenie": ucho.polecenie()}
+        polecenie = ucho.polecenie()
+        stan = {"przerwane": True, "polecenie": polecenie, "uciete": uciete,
+                "do_jarvisa": ucho.wolano_jarvisa()}
         return historia_rozmowy, stan, False
 
-    if wypowiedziane:
-        logger.info("[JARVIS] %s", wypowiedziane)
+    stan["powiedzial"] = bool(wypowiedz.powiedziane)
+    if wypowiedz.powiedziane:
+        # Odpowiedź wybrzmiała cała — reszta wcześniejszej przerwanej jest już
+        # nieaktualna. (Cicha odpowiedź "to nie do mnie" jej nie kasuje.)
+        _przerwana_reszta = None
+        logger.info("[JARVIS] %s", wypowiedz.powiedziane)
         orb.set_state("idle")
     elif stan.get("koniec"):
         # Cisza ZAMIERZONA: agent uznał, że zdanie było do kogoś innego
@@ -546,6 +592,10 @@ def rozmowa(orb, pierwszy_tekst):
 
       3. HAŁAS BEZ SŁÓW — gdy kilka razy z rzędu coś słychać, ale nie są to
          słowa (telewizor, muzyka), uznajemy, że nikt do nas nie mówi.
+
+    Przerwanie NIE kończy rozmowy. Po wejściu w słowo Jarvis słucha dalej
+    bez "Hey Jarvis" — także gdy po przerwaniu zamilkłeś, i także gdy
+    w trybie słuchawek przerwał mu ktoś, kto mówił do kogoś innego.
     """
     historia_rozmowy = pamiec.poprzednia_rozmowa()
     if historia_rozmowy:
@@ -557,11 +607,14 @@ def rozmowa(orb, pierwszy_tekst):
     # Pierwsza wypowiedź padła tuż po "Hey Jarvis", więc na pewno jest do niego.
     # Każda kolejna mogła być skierowana do kogoś innego w pokoju.
     po_wake_wordzie = True
+    # Czy ta wypowiedź przerwała Jarvisa w trybie słuchawek, bez "Hey Jarvis".
+    wszedl_w_slowo = False
 
     while tekst is not None and not wake_word_listener.czy_zatrzymano():
         # Pusty tekst znaczy "coś było słychać, ale bez słów". Nie odpowiadamy
         # na hałas — po prostu słuchamy dalej, jakby nic się nie stało.
         if not tekst.strip():
+            wszedl_w_slowo = False
             pustych_z_rzedu += 1
             if pustych_z_rzedu >= MAX_PUSTYCH_Z_RZEDU:
                 logger.info("Sam hałas %d razy z rzędu — kończę rozmowę.",
@@ -594,15 +647,26 @@ def rozmowa(orb, pierwszy_tekst):
         # odezwać się, zanim padnie odpowiedź na Twoje pytanie.
         with zajetosc.zajmij("odpowiedź"):
             historia_rozmowy, stan, koniec_po_systemie = _odpowiedz(
-                orb, tekst, historia_rozmowy, po_wake_wordzie)
+                orb, tekst, historia_rozmowy, po_wake_wordzie, wszedl_w_slowo)
+        przerwal_mi = wszedl_w_slowo
         po_wake_wordzie = False
+        wszedl_w_slowo = False
 
         # Wszedłeś Jarvisowi w słowo — nowe polecenie jest już nagrane
-        # i rozpoznane. None: po "Hey Jarvis" zapadła cisza (koniec rozmowy),
-        # "": sam hałas (słuchamy dalej) — tak samo jak niżej.
+        # i rozpoznane ("": sam hałas, słuchamy dalej — tak samo jak niżej).
         if stan.get("przerwane"):
             tekst = stan.get("polecenie")
-            po_wake_wordzie = bool(tekst)
+            # Po "Hey Jarvis" to na pewno do Jarvisa. W trybie słuchawek
+            # przerywa każdy głos — to może być rozmowa z kimś obok, więc
+            # model dostaje osobny znacznik (opis w agent.py).
+            po_wake_wordzie = bool(tekst) and stan.get("do_jarvisa", True)
+            wszedl_w_slowo = bool(tekst) and not po_wake_wordzie and stan.get("uciete", False)
+            if tekst is None:
+                # Przerwałeś i zamilkłeś. To nie koniec rozmowy — słuchamy
+                # dalej bez "Hey Jarvis", tak jak po każdej odpowiedzi.
+                logger.info("Po przerwaniu cisza — słucham dalej, bez 'Hey Jarvis'.")
+                tekst = wake_word_listener.sluchaj_bez_wake_worda(
+                    orb.set_state, limit_ciszy_s=LIMIT_CISZY_ROZMOWY_S)
             continue
 
         if koniec_po_systemie:
@@ -613,9 +677,17 @@ def rozmowa(orb, pierwszy_tekst):
         # Pożegnanie już wybrzmiało (mow_strumieniowo blokuje), więc dopiero
         # teraz wychodzimy — inaczej Jarvis urwałby sobie "do zobaczenia"
         # w połowie słowa.
+        #
+        # Wyjątek: w trybie słuchawek przerwał Jarvisowi ktoś, kto mówił do
+        # kogoś innego, i model po cichu uznał "to nie do mnie". Człowiek
+        # w takiej chwili milknie, ale nie odchodzi — za moment może usłyszeć
+        # "dobra, mów dalej". Słuchamy więc dalej, bez "Hey Jarvis".
         if stan.get("koniec"):
-            logger.info("Agent zakończył rozmowę na prośbę użytkownika.")
-            break
+            if przerwal_mi and not stan.get("powiedzial"):
+                logger.info("Przerwanie nie było do mnie — milknę, ale słucham dalej.")
+            else:
+                logger.info("Agent zakończył rozmowę na prośbę użytkownika.")
+                break
 
         if wake_word_listener.czy_zatrzymano():
             break
@@ -869,7 +941,9 @@ def main():
 
     # Ikona w zasobniku. Referencję trzeba przechować w zmiennej, inaczej
     # garbage collector posprząta obiekt i ikona zniknie po ułamku sekundy.
-    tray = gui.TrayJarvisa(app, orb, przy_zamknieciu=posprzataj, przy_ustawieniach=ustawienia)
+    tray = gui.TrayJarvisa(app, orb, przy_zamknieciu=posprzataj, przy_ustawieniach=ustawienia,
+                           czy_tryb_sluchawek=konfiguracja.tryb_sluchawek,
+                           ustaw_tryb_sluchawek=konfiguracja.ustaw_tryb_sluchawek)
 
     # Ctrl+C w aplikacji Qt: pętla zdarzeń Qt siedzi w kodzie C++ i nie oddaje
     # sterowania Pythonowi, więc domyślnie nie zauważyłby wciśnięcia Ctrl+C.

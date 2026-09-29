@@ -9,7 +9,8 @@ Mózgiem jest model **Claude** (Anthropic), a rozpoznawanie mowy i słowa aktywu
 **Rozmowa i głos**
 - 🎙️ **„Hey Jarvis”** — nasłuch w tle; przy polskiej wymowie niepewne trafienia potwierdza małym modelem Whispera
 - 💬 **Rozmowa bez powtarzania „Hey Jarvis”** — po pierwszym poleceniu słucha dalej; odróżnia zdania do siebie od rozmów ludzi w pokoju
-- ✋ **Wchodzenie w słowo** — „Hey Jarvis” w trakcie odpowiedzi: milknie, przestaje generować i od razu słucha nowego polecenia
+- ✋ **Wchodzenie w słowo, jak w rozmowie z człowiekiem** — „Hey Jarvis” w trakcie odpowiedzi: milknie w pół słowa i od razu słucha. Pamięta, w którym miejscu mu przerwałeś: „mów dalej” podejmuje wątek dokładnie stamtąd, dopytanie o temat dostaje odpowiedź w kontekście, a zmiana tematu — nowy temat. Rozmowa trwa dalej bez ponownego „Hey Jarvis”
+- 🎧 **Tryb słuchawek** (przełącznik w menu przy zegarku) — przerywa mu każde Twoje słowo, nie tylko „Hey Jarvis”
 - 🗣️ **Rozpoznawanie mowy lokalnie** (faster-whisper) ze słownikiem nazw własnych — Twoi wykonawcy, albumy i aplikacje; „zapamiętaj słowo Tarcho Terror” dopisuje własne
 - 🔊 **Odpowiedzi głosem**, zdanie po zdaniu, bez czekania na całą odpowiedź
 - 🧠 **Pamięć długoterminowa** — „zapamiętaj, że pracuję do 16”, „co o mnie wiesz?”; zapisuje tylko na wyraźną prośbę i nigdy nie zapisuje haseł, kluczy ani kodów
@@ -32,9 +33,9 @@ Mózgiem jest model **Claude** (Anthropic), a rozpoznawanie mowy i słowa aktywu
 - 🔎 **Internet** — pogoda, wyniki, bieżące sprawy przez wyszukiwarkę
 
 **Telefon i wygląd**
-- 📱 **Telegram** — rozmowa tekstem i głosówkami, odpowiedzi też głosówkami, przypomnienia i powiadomienia o mailach na telefon; „stop” przerywa odpowiedź
+- 📱 **Telegram** — rozmowa tekstem i głosówkami, odpowiedzi też głosówkami, przypomnienia i powiadomienia o mailach na telefon; „stop” przerywa odpowiedź, „dokończ” ją wznawia
 - 💫 **HUD na pełnym ekranie** w stylu Iron Mana — pierścienie reagujące na stan (czuwam / słucham / myślę / mówię), zegar, procesor, pamięć, sieć i temperatura
-- 📌 **Działanie w tle** — ikona w zasobniku przy zegarku, w jej menu **Ustawienia**
+- 📌 **Działanie w tle** — ikona w zasobniku przy zegarku, w jej menu **Ustawienia** i **Tryb słuchawek**
 
 ## 💬 Przykładowe polecenia
 
@@ -47,6 +48,7 @@ Powiedz **„Hey Jarvis”**, a potem na przykład:
 - *„Co dziś?”*, *„Co mam jutro?”*, *„O której mam dentystę w poniedziałek?”*
 - *„Czy przyszedł mail ze słowami rekrutacja, praca, AI w ciągu 4 godzin?”*, *„Daj znać, jak przyjdzie mail od Allegro”*
 - *„Zapamiętaj, że pracuję do szesnastej”*, *„Co o mnie wiesz?”*, *„Zapomnij, do której pracuję”*
+- W trakcie odpowiedzi: *„Hey Jarvis”* → *„mów dalej”*, *„a ile to kosztuje?”*, *„nie, pytałem o co innego”*
 - *„Przetłumacz to, co skopiowałem”*, *„Co jest na ekranie?”*, *„Co mi zjada procesor?”*
 - *„Zanotuj, że mam oddać książkę”*, *„Jaka jutro pogoda?”*
 
@@ -199,6 +201,7 @@ Modeli mowy nie ma w instalatorze (byłby pięć razy większy) — pobiera je k
 - Tylko **Windows** (polecenia systemowe, Opera GX, pywin32).
 - Rozpoznawanie mowy liczy na procesorze — od końca wypowiedzi do tekstu mija kilka sekund.
 - Wchodzenie w słowo najpewniej działa na słuchawkach; przy bardzo głośnych głośnikach Jarvis może Cię nie usłyszeć. Narzędzie w toku (np. szukanie w Spotify) kończy się przed przerwaniem.
+- Tryb słuchawek włączaj tylko na słuchawkach — przez głośniki Jarvis słyszałby sam siebie i milkł po pierwszych słowach. W tym trybie przerwać może też ktoś, kto mówi obok; Jarvis wtedy milknie, ale słucha dalej, więc wystarczy „mów dalej”.
 - Sterowanie Spotify wymaga konta **Premium**.
 - Temperatura procesora bez LibreHardwareMonitora jest niedostępna — HUD pokazuje wtedy temperaturę karty NVIDIA.
 
