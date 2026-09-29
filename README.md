@@ -1,7 +1,3 @@
-
-
-https://github.com/user-attachments/assets/33d63e38-b3db-4a40-871d-0c1916f2d56b
-
 # 🤖 Jarvis — osobisty asystent głosowy
 
 Asystent głosowy dla Windows inspirowany Jarvisem z filmów o Iron Manie. Mówisz **„Hey Jarvis”**, a on rozumie polecenia w naturalnym języku, prowadzi rozmowę i sam sięga po narzędzia: puszcza muzykę w Spotify, otwiera programy i strony, pilnuje przypomnień, czyta kalendarz i pocztę, odpowiada na pytania z internetu. Możesz z nim też pisać i nagrywać głosówki przez Telegram.
