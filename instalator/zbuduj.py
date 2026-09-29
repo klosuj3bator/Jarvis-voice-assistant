@@ -12,6 +12,8 @@ Kolejne kroki (każdy musi się udać, zanim ruszy następny):
 Opcje:
   --bez-instalatora   pomiń krok 5
   --bez-autotestu     pomiń krok 4 (np. na komputerze bez karty dźwiękowej)
+  --tylko-instalator  zmieniłeś tylko jarvis.iss — użyj gotowej paczki z dist/Jarvis
+                      (kroki 3 i 5; sprawdzenie prywatności zawsze się wykonuje)
 """
 
 import json
@@ -154,14 +156,24 @@ def instalator():
 
 
 if __name__ == "__main__":
+    tylko_instalator = "--tylko-instalator" in sys.argv
+    if tylko_instalator and not os.path.exists(os.path.join(PACZKA, "Jarvis.exe")):
+        raise SystemExit("Nie ma gotowej paczki w dist/Jarvis — uruchom bez --tylko-instalator.")
+
     krok(1, "Ikona")
-    ikona()
+    if tylko_instalator and os.path.exists(os.path.join(BUILD, "jarvis.ico")):
+        print("  pominięta (jest z poprzedniego budowania)")
+    else:
+        ikona()
     krok(2, "Pakowanie (PyInstaller, tryb folderu)")
-    pakowanie()
+    if tylko_instalator:
+        print("  pominięte — używam gotowej paczki z dist/Jarvis")
+    else:
+        pakowanie()
     krok(3, "Prywatność paczki")
     prywatnosc()
     krok(4, "Autotest paczki")
-    if "--bez-autotestu" in sys.argv:
+    if "--bez-autotestu" in sys.argv or tylko_instalator:
         print("  pominięty")
     else:
         autotest()

@@ -2,147 +2,185 @@
 
 https://github.com/user-attachments/assets/33d63e38-b3db-4a40-871d-0c1916f2d56b
 
-# 🤖 Jarvis — Osobisty Asystent Głosowy
+# 🤖 Jarvis — osobisty asystent głosowy
 
-Asystent głosowy sterowany komendami mowy, inspirowany Jarvisem z filmów o Iron Manie. Wykrywa słowo aktywujące, rozumie polecenia w języku naturalnym i wykonuje je — odtwarza muzykę w Spotify, otwiera i zamyka aplikacje na komputerze.
+Asystent głosowy dla Windows inspirowany Jarvisem z filmów o Iron Manie. Mówisz **„Hey Jarvis”**, a on rozumie polecenia w naturalnym języku, prowadzi rozmowę i sam sięga po narzędzia: puszcza muzykę w Spotify, otwiera programy i strony, pilnuje przypomnień, czyta kalendarz i pocztę, odpowiada na pytania z internetu. Możesz z nim też pisać i nagrywać głosówki przez Telegram.
 
-## ✨ Funkcje
+Mózgiem jest model **Claude** (Anthropic), a rozpoznawanie mowy i słowa aktywującego działa **lokalnie** na Twoim komputerze. Rozmawia po polsku.
 
-- 🎙️ **Wykrywanie słowa aktywującego** — działa w tle, aktywuje się na komendę "Hey Jarvis"; przy polskiej wymowie niepewne trafienia potwierdza małym modelem Whispera (`python wake_word_listener.py kalibracja` sprawdza Twoją wymowę)
-- ✋ **Wchodzenie w słowo** — "Hey Jarvis" w trakcie odpowiedzi: Jarvis milknie, przestaje generować i od razu słucha nowego polecenia; przez Telegram to samo robi wiadomość "stop"
-- 🗣️ **Rozpoznawanie mowy** — zamiana głosu na tekst lokalnie (polski i angielski); słownik podpowiedzi z Twoich wykonawców, albumów i aplikacji pomaga trafiać w nazwy własne ("Jarvis, zapamiętaj słowo Tarcho Terror" dopisuje własne)
-- 🧠 **Rozumienie intencji** — analiza komend przez Claude API
-- 🎵 **Sterowanie Spotify** — wyszukiwanie i odtwarzanie utworów i albumów, pauza, wznowienie, następny/poprzedni, "co teraz gra", losowo i powtarzanie
-- 🚀 **Uruchamianie i zamykanie aplikacji** — na podstawie komend głosowych
-- 🌐 **Strony w Operze GX** — otwieranie stron i wyszukiwanie fraz (Google, YouTube i inne serwisy)
-- 🔊 **Sterowanie komputerem** — głośność, jasność ekranu, blokada, uśpienie, restart i wyłączenie (restart i wyłączenie po potwierdzeniu głosem)
-- 📝 **Notatki głosowe** — zapis do pliku Markdown z datą dnia (`notatki/2026-09-24.md`) i odczyt dzisiejszych
-- 🧠 **Pamięć długoterminowa** — "zapamiętaj, że pracuję do 16", "co o mnie wiesz?", "zapomnij o…"; zapis tylko na wyraźną prośbę, do `memory.json` (poza gitem); haseł, kluczy i kodów nie zapisuje nigdy
-- 👁️ **Czytanie ekranu** — "co jest na ekranie?", "przeczytaj ten błąd", "streść tę stronę"; zrzut zmniejszony do 1280 px, tylko w pamięci
-- 📋 **Schowek** — tłumaczenie, streszczanie i poprawianie skopiowanego tekstu; dłuższy wynik trafia z powrotem do schowka
-- 🩺 **Stan komputera** — procesor, RAM, karta NVIDIA, wolne miejsce, działające programy, niedokończone pobierania; zrzut ekranu na Telegram
-- 📱 **Telegram** — rozmowa z telefonu tekstem i głosówkami, odpowiedzi też jako głosówki, przypomnienia na telefon
-- 📧 **Poczta (Gmail, tylko odczyt)** — szukanie maili po słowach i nadawcy z ostatnich godzin; czujki "daj znać, jak przyjdzie mail od…" z powiadomieniem głosówką na Telegram; treść maili to dla Jarvisa wyłącznie dane, nigdy polecenia
-- 📅 **Kalendarz Google (tylko odczyt)** — "co mam jutro?", "co mam w piątek?", "czy mam coś 12.10?"; z wydarzeniami powtarzającymi się, w strefie Europe/Warsaw
-- ☀️ **Poranny briefing** — "co dziś?": dzień, data, godzina, pogoda, dzisiejsze wydarzenia z kalendarza, przypomnienia i wczorajsze notatki w kilku zdaniach
-- ⏰ **Przypomnienia i timery** — "za 20 minut", "jutro o ósmej"; przetrwają restart, a przypomnienie czeka, aż Jarvis skończy mówić lub słuchać
-- 🔍 **Automatyczne wykrywanie zainstalowanych programów** — przeszukuje Menu Start i zapamiętuje lokalizacje
-- 📈 **Odczyty w rogu HUD-a** — procesor, pamięć, prędkość sieci (z zapamiętanym szczytem) i temperatura z limitem
-- 💫 **Wizualny interfejs** — pulsujące, świecące okienko reagujące na stan asystenta (nasłuchuje / przetwarza / błąd)
-- 📌 **Działanie w tle** — ikona w zasobniku systemowym, w jej menu **Ustawienia** (klucze)
-- 🧭 **Kreator pierwszego uruchomienia** — wymagany tylko klucz Anthropic, reszta opcjonalna; każdy klucz sprawdzany od razu, zapis w `%APPDATA%\Jarvis`
+## ✨ Co potrafi
+
+**Rozmowa i głos**
+- 🎙️ **„Hey Jarvis”** — nasłuch w tle; przy polskiej wymowie niepewne trafienia potwierdza małym modelem Whispera
+- 💬 **Rozmowa bez powtarzania „Hey Jarvis”** — po pierwszym poleceniu słucha dalej; odróżnia zdania do siebie od rozmów ludzi w pokoju
+- ✋ **Wchodzenie w słowo** — „Hey Jarvis” w trakcie odpowiedzi: milknie, przestaje generować i od razu słucha nowego polecenia
+- 🗣️ **Rozpoznawanie mowy lokalnie** (faster-whisper) ze słownikiem nazw własnych — Twoi wykonawcy, albumy i aplikacje; „zapamiętaj słowo Tarcho Terror” dopisuje własne
+- 🔊 **Odpowiedzi głosem**, zdanie po zdaniu, bez czekania na całą odpowiedź
+- 🧠 **Pamięć długoterminowa** — „zapamiętaj, że pracuję do 16”, „co o mnie wiesz?”; zapisuje tylko na wyraźną prośbę i nigdy nie zapisuje haseł, kluczy ani kodów
+
+**Muzyka i komputer**
+- 🎵 **Spotify** — utwory i albumy, pauza, następny, „co teraz gra”, losowo, powtarzanie
+- 🚀 **Programy** — uruchamianie i zamykanie; sam znajduje zainstalowane aplikacje w menu Start
+- 🌐 **Strony w Operze GX** — otwieranie adresów i wyszukiwanie fraz (Google, YouTube i inne)
+- 🔊 **Sterowanie komputerem** — głośność, jasność, blokada, uśpienie, restart i wyłączenie (te dwa ostatnie dopiero po potwierdzeniu)
+- 👁️ **Czytanie ekranu** — „co jest na ekranie?”, „przeczytaj ten błąd”, „streść tę stronę”
+- 📋 **Schowek** — tłumaczenie, streszczanie i poprawianie skopiowanego tekstu
+- 🩺 **Stan komputera** — procesor, RAM, karta NVIDIA, dyski, działające programy, pobierania
+
+**Organizacja i informacje**
+- ⏰ **Przypomnienia i timery** — „za 20 minut”, „jutro o ósmej”; przetrwają restart
+- 📝 **Notatki głosowe** — zapis do plików Markdown z datą
+- 📅 **Kalendarz Google** (tylko odczyt) — „co mam jutro?”, z wydarzeniami powtarzającymi się
+- 📧 **Poczta Gmail** (tylko odczyt) — szukanie maili i czujki „daj znać, jak przyjdzie mail od…”
+- ☀️ **Poranny briefing** — „co dziś?”: data, pogoda, kalendarz, przypomnienia w kilku zdaniach
+- 🔎 **Internet** — pogoda, wyniki, bieżące sprawy przez wyszukiwarkę
+
+**Telefon i wygląd**
+- 📱 **Telegram** — rozmowa tekstem i głosówkami, odpowiedzi też głosówkami, przypomnienia i powiadomienia o mailach na telefon; „stop” przerywa odpowiedź
+- 💫 **HUD na pełnym ekranie** w stylu Iron Mana — pierścienie reagujące na stan (czuwam / słucham / myślę / mówię), zegar, procesor, pamięć, sieć i temperatura
+- 📌 **Działanie w tle** — ikona w zasobniku przy zegarku, w jej menu **Ustawienia**
+
+## 💬 Przykładowe polecenia
+
+Powiedz **„Hey Jarvis”**, a potem na przykład:
+
+- *„Puść album Nevermind”*, *„Następna”*, *„Co to za kawałek?”*
+- *„Otwórz Chrome”*, *„Odpal Operę GX i włącz mi Gmaila”*, *„Wpisz w operze przepis na pizzę”*
+- *„Przycisz do trzydziestu procent”*, *„Zablokuj ekran”*
+- *„Przypomnij mi za 20 minut o praniu”*, *„Timer na 5 minut”*
+- *„Co dziś?”*, *„Co mam jutro?”*, *„O której mam dentystę w poniedziałek?”*
+- *„Czy przyszedł mail ze słowami rekrutacja, praca, AI w ciągu 4 godzin?”*, *„Daj znać, jak przyjdzie mail od Allegro”*
+- *„Zapamiętaj, że pracuję do szesnastej”*, *„Co o mnie wiesz?”*, *„Zapomnij, do której pracuję”*
+- *„Przetłumacz to, co skopiowałem”*, *„Co jest na ekranie?”*, *„Co mi zjada procesor?”*
+- *„Zanotuj, że mam oddać książkę”*, *„Jaka jutro pogoda?”*
+
+## 📥 Instalacja
+
+**Wymagania:** Windows 10 lub 11 (64-bit), mikrofon, internet, ok. 1 GB miejsca (program + modele mowy) i klucz API Anthropic z doładowanymi środkami.
+
+### Instalator (dla większości osób)
+
+1. Pobierz `JarvisSetup.exe` z zakładki [Releases](https://github.com/klosuj3bator/Jarvis-voice-assistant/releases) i uruchom. Nie potrzebuje uprawnień administratora.
+2. Windows może ostrzec przed nieznanym wydawcą — instalator nie jest jeszcze podpisany certyfikatem. Wybierz **Więcej informacji → Uruchom mimo to**.
+3. Przy pierwszym uruchomieniu kreator poprosi o klucze i pobierze modele mowy (ok. 560 MB, zwykle kilka minut).
+
+Instalator dodaje skrót na pulpicie, wpis w menu Start i — jeśli zaznaczysz — autostart z Windowsem. Deinstalator jest w Ustawieniach Windows → Aplikacje.
+
+### Z kodu źródłowego
+
+Projekt jest rozwijany na Pythonie 3.14.
+
+```bash
+git clone https://github.com/klosuj3bator/Jarvis-voice-assistant.git
+```
+
+```bash
+cd Jarvis-voice-assistant
+```
+
+```bash
+python -m venv venv
+```
+
+```bash
+venv\Scripts\activate
+```
+
+```bash
+pip install -r requirements.txt
+```
+
+```bash
+python main.py
+```
+
+`python main.py` pokazuje dziennik na żywo w terminalu; `Jarvis.pyw` uruchamia Jarvisa w tle, bez okna konsoli.
+
+## ⚙️ Konfiguracja
+
+Przy pierwszym uruchomieniu otwiera się **kreator**. Wymagany jest tylko klucz Anthropic — Spotify, Telegram, Gmail i kalendarz możesz pominąć i dodać później w **Ustawieniach** (prawy przycisk na ikonie Jarvisa przy zegarku). Przy każdym kluczu jest instrukcja i link, a przycisk **„Sprawdź i dalej”** łączy się z usługą, zanim puści Cię dalej — zły klucz wychodzi od razu.
+
+<p align="center"><img src="docs/kreator.png" width="620" alt="Kreator pierwszego uruchomienia"></p>
+
+| Usługa | Do czego | Skąd klucz |
+|---|---|---|
+| **Anthropic** (wymagany) | mózg Jarvisa — model Claude | [platform.claude.com](https://platform.claude.com) → API Keys |
+| Spotify | muzyka (sterowanie wymaga konta Premium) | [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) → Create app, Redirect URI `http://127.0.0.1:8888/callback` |
+| Telegram | rozmowa z telefonu, powiadomienia | [@BotFather](https://t.me/BotFather) → `/newbot`; swoje ID wykryje kreator |
+| Gmail | szukanie maili, czujki | [hasło aplikacji](https://myaccount.google.com/apppasswords) (wymaga weryfikacji dwuetapowej) — nie zwykłe hasło |
+| Kalendarz Google | „co mam jutro?” | [ustawienia kalendarza](https://calendar.google.com/calendar/r/settings) → Integracja kalendarza → Tajny adres w formacie iCal |
+
+Funkcje bez kluczy są wyłączone — Jarvis mówi wtedy wprost, że dana funkcja nie jest skonfigurowana.
+
+**Gdzie leżą klucze i dane.** Kreator zapisuje klucze w `%APPDATA%\Jarvis\config.env`. Wersja z instalatora trzyma tam też całą resztę: pamięć, notatki, przypomnienia, dziennik i modele mowy. Uruchamiana z kodu trzyma dane obok kodu, a klucze możesz też wpisać do pliku `.env` (wzór: `.env.example`) — kolejność ważności: zmienne środowiskowe Windows → Ustawienia → `.env`.
+
+**Słownik nazw ze Spotify (opcjonalnie).** Żeby Whisper lepiej rozpoznawał Twoich wykonawców, słownik zagląda do historii słuchania. To osobne uprawnienia, więc zgodę dajesz raz: `python slownik.py spotify`.
+
+## 🔒 Prywatność i bezpieczeństwo
+
+- **Dźwięk z mikrofonu nie opuszcza komputera.** „Hey Jarvis” i rozpoznawanie mowy działają lokalnie; do Claude trafia tylko tekst polecenia. Tekst odpowiedzi idzie do syntezatora mowy Microsoftu (edge-tts).
+- **Maile i zaproszenia z kalendarza to dla Jarvisa wyłącznie dane.** Po odczytaniu poczty narzędzia są blokowane w kodzie do końca odpowiedzi — obcy mail nie wyda Jarvisowi polecenia. Poczta i kalendarz są tylko do odczytu.
+- **Telegram odpowiada wyłącznie Tobie** (Twoje ID), obcych ignoruje. Restart i wyłączenie komputera wymagają potwierdzenia.
+- **Pamięć tylko na prośbę.** Fakty zapisuje dopiero po „zapamiętaj”; hasła, klucze i kody są odrzucane w kodzie, a wypowiedzi wyglądające na hasło nie trafiają do dziennika.
+- **Klucze nigdy nie trafiają do dziennika** ani do repozytorium; skrypt budujący instalator sprawdza, czy w paczce nie ma prywatnych plików ani wartości kluczy.
+
+## 💰 Koszty
+
+Jarvis korzysta z płatnego API Anthropic (model Claude Sonnet 5, z cache promptów). Orientacyjnie: zwykłe zdanie w rozmowie to ok. **0,3–0,4 centa**, pierwsze zdanie po dłuższej przerwie ok. 3 centów, pytanie wymagające wyszukiwania w internecie (np. pogoda) 3–7 centów. Koszt każdego zapytania i suma od startu są zapisywane w `jarvis.log`. Wątki w tle (przypomnienia, czujki poczty) nie wywołują Claude.
 
 ## 🧠 Jak to działa
 
 ```mermaid
 graph TD
-    A[Mikrofon - ciągłe nasłuchiwanie] --> B{Wykryto 'Hey Jarvis'?}
-    B -- Nie --> A
-    B -- Tak --> C[Nagrywanie komendy]
-    C --> D[Speech-to-Text - faster-whisper]
-    D --> E[Router komend - Claude API]
-    E --> F{Typ akcji}
-    F -- play_song --> G[Spotify Web API]
-    F -- open_app --> H[Uruchomienie aplikacji]
-    F -- close_app --> I[Zamknięcie aplikacji]
-    F -- unknown --> J[Nie zrozumiano komendy]
+    A["Mikrofon — nasłuch w tle"] --> B{"'Hey Jarvis'?<br/>openWakeWord + Whisper tiny"}
+    B -- nie --> A
+    B -- tak --> C["Nagrywanie do ciszy (VAD)"]
+    C --> D["Rozpoznawanie mowy<br/>faster-whisper + słownik nazw"]
+    T["Telegram — tekst i głosówki"] --> E
+    D --> E["Agent Claude<br/>wybiera narzędzia"]
+    E --> F["Narzędzia: Spotify, programy, strony,<br/>przypomnienia, kalendarz, poczta,<br/>pamięć, ekran, schowek, internet"]
+    F --> E
+    E --> G["Mowa zdanie po zdaniu (edge-tts)<br/>albo odpowiedź na Telegramie"]
+    G --> H{"Mówisz dalej?"}
+    H -- "tak, bez 'Hey Jarvis'" --> C
+    H -- "cisza" --> A
+    G -. "'Hey Jarvis' w trakcie —<br/>przerwanie" .-> C
 ```
+
+Jeden agent (`agent.py`) prowadzi całą rozmowę: sam decyduje, czy odpowiedzieć, czy sięgnąć po narzędzie, i widzi wyniki narzędzi, więc przy błędzie może spróbować inaczej. Przypomnienia i czujki poczty pilnuje osobny wątek, bez udziału modelu.
 
 ## 🛠️ Stos technologiczny
 
-| Komponent | Technologia |
+| Część | Technologia |
 |---|---|
-| Wykrywanie wake worda | openWakeWord |
-| Speech-to-Text | faster-whisper |
-| Rozpoznawanie intencji | Claude API (Anthropic) |
-| Integracja ze Spotify | Spotipy (Spotify Web API) |
-| Interfejs graficzny | PySide6 |
-| Zarządzanie procesami | psutil, pywin32 |
+| Model językowy | Claude Sonnet 5 (Anthropic API) z narzędziami i wyszukiwarką |
+| Słowo aktywujące | openWakeWord (+ faster-whisper tiny do potwierdzeń) |
+| Rozpoznawanie mowy | faster-whisper (small, CPU) |
+| Synteza mowy | edge-tts, PyAV, sounddevice |
+| Interfejs | PySide6 (Qt Quick + shader HUD-a, okna Qt Widgets) |
+| Integracje | Spotipy, Telegram Bot API, IMAP (Gmail), iCalendar |
+| System | psutil, pywin32, pycaw, pynvml |
+| Instalator | PyInstaller + Inno Setup |
 
-## 🚀 Instalacja
+## 📂 Struktura projektu
 
-```bash
-git clone https://github.com/klosuj3bator/Jarvis-voice-assistant.git
-cd Jarvis-voice-assistant
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-## ⚙️ Konfiguracja
-
-Przy pierwszym uruchomieniu otworzy się **kreator**: wymagany jest tylko klucz Anthropic, a Spotify, Telegram, Gmail i kalendarz możesz pominąć. Przy każdym kluczu jest instrukcja i link, skąd go wziąć, a przycisk „Sprawdź i dalej” łączy się z usługą, zanim puści Cię dalej. Później to samo okno otwierasz z menu ikony przy zegarku: **Ustawienia**. Podgląd bez Jarvisa: `python setup_wizard.py`.
-
-Klucze zapisują się w `%APPDATA%\Jarvis\config.env`, nie w folderze programu. Funkcje bez kluczy są wyłączone — Jarvis mówi wtedy wprost, że dana funkcja nie jest skonfigurowana.
-
-**Plik `.env` dalej działa** (wzór: `.env.example`). Kolejność, od najważniejszego: zmienne środowiskowe Windows → Ustawienia (`%APPDATA%`) → `.env`. Kreator nigdy nie zmienia `.env`; wyłączenie funkcji w Ustawieniach zapisuje pusty klucz w `%APPDATA%`, który wygrywa z `.env`.
-
-Poniżej to samo, co mówi kreator — gdybyś wolał wpisać klucze do `.env` ręcznie:
-
-SPOTIPY_CLIENT_ID=twoj_client_id
-SPOTIPY_CLIENT_SECRET=twoj_client_secret
-SPOTIPY_REDIRECT_URI=http://127.0.0.1:8888/callback
-ANTHROPIC_API_KEY=twoj_klucz_api
-
-
-- Klucze Spotify: [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) (wymaga konta Premium)
-- Klucz Anthropic: [Claude Platform](https://platform.claude.com)
-
-### 📱 Telegram (opcjonalnie)
-
-Rozmowa z Jarvisem z telefonu — tekstem i głosówkami. Bez tych kluczy Jarvis działa normalnie, tylko bez Telegrama.
-
-TELEGRAM_JARVIS_TOKEN=token_od_BotFather
-TELEGRAM_OWNER_ID=twoje_id
-
-1. W Telegramie napisz do **@BotFather**, wyślij `/newbot` i wybierz nazwę. Dostaniesz token — wpisz go jako `TELEGRAM_JARVIS_TOKEN`.
-2. Uruchom `python telegram_bridge.py kto-ja` i napisz cokolwiek do swojego bota. Skrypt wypisze Twoje ID — wpisz je jako `TELEGRAM_OWNER_ID`.
-3. Uruchom Jarvisa ponownie.
-
-Bot odpowiada **wyłącznie** na Twoje ID; wiadomości od innych ignoruje i zapisuje w dzienniku. Restart i wyłączenie komputera z telefonu wymagają odpisania „tak”.
-
-### 📅 Kalendarz Google (opcjonalnie)
-
-GOOGLE_CALENDAR_ICAL_URL=tajny_adres_ical
-
-1. Otwórz [Kalendarz Google](https://calendar.google.com) → ⚙️ **Ustawienia** → po lewej wybierz swój kalendarz.
-2. W sekcji **Integracja kalendarza** skopiuj **Tajny adres w formacie iCal** i wpisz go do `.env`.
-3. Uruchom Jarvisa ponownie. `python kalendarz.py jutro` pokazuje, co Jarvis widzi.
-
-Ten adres działa jak hasło — kto go zna, czyta cały kalendarz. Jarvis nie zapisuje go w dzienniku ani nie wysyła modelowi. Gdyby wyciekł, w tym samym miejscu ustawień jest przycisk **Resetuj**. Jarvis widzi tylko godzinę, tytuł i miejsce wydarzeń (bez opisów), a wydarzeń, które odrzuciłeś, nie pokazuje.
-
-### 🎧 Słownik nazw ze Spotify (opcjonalnie)
-
-Żeby Whisper lepiej rozpoznawał Twoich wykonawców i albumy, słownik podpowiedzi zagląda do historii słuchania i obserwowanych wykonawców. To inne uprawnienia niż sterowanie muzyką, więc zgodę dajesz raz, osobno:
-
-```bash
-python slownik.py spotify
-```
-
-Bez tego słownik działa na aplikacjach, pamięci i ręcznie dopisanych słowach. `python slownik.py` pokazuje, co jest w słowniku.
-
-### 📧 Poczta Gmail (opcjonalnie)
-
-Szukanie maili i czujki na nowe maile. Bez tych kluczy Jarvis działa normalnie, tylko bez poczty.
-
-GMAIL_ADDRESS=twoj_adres@gmail.com
-GMAIL_APP_PASSWORD=haslo_aplikacji
-
-1. Włącz weryfikację dwuetapową na koncie Google.
-2. Wejdź na [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords), utwórz hasło aplikacji (np. „Jarvis”) i wpisz je jako `GMAIL_APP_PASSWORD`. **Nie wpisuj zwykłego hasła do konta.**
-3. Uruchom Jarvisa ponownie.
-
-Skrzynka jest otwierana **tylko do odczytu** — Jarvis nie oznacza maili jako przeczytane, niczego nie usuwa i nie wysyła. Widzi tylko nadawcę, temat i godzinę, bez treści maila. Czujki sprawdzają pocztę co 5 minut; o każdym mailu powiadamiają tylko raz (tekstem i głosówką na Telegram, więc wymagają skonfigurowanego Telegrama). Reguły są zapisane w `email_watches.json`.
+| Plik | Co robi |
+|---|---|
+| `main.py`, `Jarvis.pyw` | start programu, pętla nasłuchu i rozmowy |
+| `agent.py` | agent Claude: instrukcje, narzędzia, historia, koszty |
+| `wake_word_listener.py` | mikrofon, „Hey Jarvis”, nagrywanie, Whisper, wchodzenie w słowo |
+| `tts.py` | mowa zdanie po zdaniu |
+| `gui.py`, `hud.qml`, `hud.frag` | HUD na pełnym ekranie i ikona w zasobniku |
+| `setup_wizard.py`, `konfiguracja.py` | kreator, Ustawienia, skąd brać klucze |
+| `sciezki.py`, `modele.py` | gdzie leżą dane i modele, pobieranie modeli |
+| `spotify_controller.py`, `app_launcher.py`, `przegladarka.py`, `system_control.py` | muzyka, programy, strony, sterowanie komputerem |
+| `reminders.py`, `notes.py`, `kalendarz.py`, `email_monitor.py`, `briefing.py` | przypomnienia, notatki, kalendarz, poczta, briefing |
+| `pamiec.py`, `slownik.py`, `schowek.py`, `stan_komputera.py`, `czujniki.py` | pamięć, słownik nazw, schowek, stan komputera, odczyty HUD-a |
+| `telegram_bridge.py` | rozmowa przez Telegram |
+| `instalator/` | budowanie instalatora (PyInstaller, Inno Setup, sprawdzanie paczki) |
+| `chat.py`, `router.py` | starsza architektura (router + czat), zachowana, nieużywana |
 
 ## 📦 Budowanie instalatora
-
-Instalator `JarvisSetup.exe` dla innych osób buduje jedno polecenie:
-
-```bash
-python instalator/zbuduj.py
-```
-
-Potrzebne raz, przed pierwszym budowaniem:
 
 ```bash
 pip install pyinstaller
@@ -152,63 +190,27 @@ pip install pyinstaller
 winget install JRSoftware.InnoSetup
 ```
 
-Skrypt robi po kolei:
-
-1. **Ikona** — `build/jarvis.ico` w stylu HUD-a.
-2. **Pakowanie** — PyInstaller w trybie folderu (`instalator/jarvis.spec`) → `dist/Jarvis/`. Tryb folderu, a nie jednego pliku, bo jeden plik przy każdym starcie rozpakowywałby kilkaset MB do folderu tymczasowego.
-3. **Prywatność** — `instalator/sprawdz_paczke.py` szuka w paczce Twoich plików (`.env`, tokeny Spotify, `memory.json`, notatki, przypomnienia, dziennik, cache, modele) oraz **prawdziwych wartości Twoich kluczy** we wszystkich plikach, także w skompilowanym kodzie wewnątrz `Jarvis.exe`. Jeśli coś znajdzie, instalator nie powstaje.
-4. **Autotest** — uruchamia zbudowany `Jarvis.exe --autotest` na czystym, tymczasowym `%APPDATA%` i sprawdza, czy działają Qt, silnik Whispera, dźwięk, strefy czasowe i HTTPS.
-5. **Instalator** — Inno Setup (`instalator/jarvis.iss`) → `dist/JarvisSetup.exe`.
-
-Numer wersji zmieniasz w `wersja.py`. `build/`, `dist/` i gotowy instalator są w `.gitignore`.
-
-**Co dostaje osoba instalująca:** Jarvisa w Programach (bez uprawnień administratora), skrót na pulpicie, wpis w menu Start, opcjonalny autostart z Windowsem i deinstalator. Przy pierwszym uruchomieniu kreator prosi o klucze i pobiera modele mowy (ok. 560 MB) do `%APPDATA%\Jarvis\modele` — instalator ich nie zawiera. Wszystkie dane (klucze, pamięć, notatki, dziennik) trzyma w `%APPDATA%\Jarvis`; deinstalator pyta, czy je usunąć. Windows może ostrzec przed nieznanym wydawcą, bo instalator nie jest podpisany certyfikatem — wtedy „Więcej informacji” → „Uruchom mimo to”.
-
-Wersja uruchamiana z kodu (`python main.py`) działa jak dawniej: dane trzyma obok kodu, a modele bierze z cache Hugging Face.
-
-## ▶️ Użycie
-
 ```bash
-python main.py
+python instalator/zbuduj.py
 ```
 
-Powiedz **"Hey Jarvis"**, a następnie komendę, np.:
-- *"Puść piosenkę Bohemian Rhapsody"*
-- *"Następna"*, *"Pauza"*, *"Co to za kawałek?"*
-- *"Otwórz Chrome"*
-- *"Zamknij Spotify"*
-- *"Odpal Operę GX i włącz mi Gmaila"*
-- *"Wpisz w operze przepis na pizzę"*
-- *"Przycisz do trzydziestu procent"*
-- *"Ustaw jasność na sześćdziesiąt"*
-- *"Zablokuj ekran"*
-- *"Zanotuj, że mam oddać książkę"*
-- *"Co dziś zanotowałem?"*
-- *"Zapamiętaj, że pracuję do szesnastej"*, *"Co o mnie wiesz?"*, *"Zapomnij, do której pracuję"*
-- *"Zapamiętaj słowo Tarcho Terror"* (dokładną pisownię najpewniej podasz tekstem przez Telegram)
-- *"Przypomnij mi za 20 minut o praniu"*
-- *"Timer na 5 minut"*
-- *"Jakie mam przypomnienia?"*
-- *"Co dziś?"* / *"Poranny briefing"* / *"Good morning"*
-- *"Co mam jutro?"*, *"O której mam dentystę w poniedziałek?"*, *"Co mam dwunastego października?"*
-- *"Jak się ma komputer?"*, *"Co mi zjada procesor?"*, *"Jak idzie pobieranie?"*
-- *"Przetłumacz to, co skopiowałem"*, *"Streść to"*, *"Popraw błędy w tym tekście"*
-- *"Co jest na ekranie?"*, *"Przeczytaj ten błąd i powiedz, co się stało"*, *"Co jest na drugim monitorze?"*
-- *"Czy przyszedł mail ze słowami rekrutacja, praca, AI w ciągu 4 godzin?"*
-- *"Daj znać, jak przyjdzie mail od Allegro"*, *"Na jakie maile czekasz?"*, *"Anuluj czujkę na Allegro"*
+Skrypt robi po kolei: ikonę → paczkę PyInstallerem w trybie folderu (`dist/Jarvis/`) → **sprawdzenie prywatności** (czy w paczce nie ma `.env`, tokenów, pamięci, notatek, dziennika, modeli ani wartości Twoich kluczy — także w skompilowanym kodzie wewnątrz `Jarvis.exe`; jeśli coś znajdzie, przerywa) → **autotest** zbudowanego `Jarvis.exe` na czystym `%APPDATA%` → instalator Inno Setup (`dist/JarvisSetup.exe`). Zmieniłeś tylko `instalator/jarvis.iss`? Dodaj `--tylko-instalator`. Numer wersji jest w `wersja.py`.
+
+Modeli mowy nie ma w instalatorze (byłby pięć razy większy) — pobiera je kreator. Instalator nie jest podpisany, więc Windows pokazuje ostrzeżenie o nieznanym wydawcy, a Windows Defender bywa podejrzliwy wobec programów z PyInstallera; nową wersję warto zgłosić Microsoftowi jako twórca oprogramowania ([formularz](https://www.microsoft.com/en-us/wdsi/filesubmission) → *Software developer*).
 
 ## ⚠️ Znane ograniczenia
 
-- Wchodzenie w słowo najpewniej działa na słuchawkach. Na głośnikach mikrofon słyszy też Jarvisa; w testach Twoje "Hey Jarvis" i tak się przebijało, ale przy bardzo głośnych głośnikach może nie zadziałać. Narzędzia w toku (np. szukanie w Spotify) kończą się przed przerwaniem — Jarvis milknie od razu, ale nie przerywa ich w połowie
-
-- Sterowanie odtwarzaniem w Spotify wymaga konta **Premium**
-- Rozpoznawanie mowy może mieć trudności z nietypowymi nazwami własnymi
-- Projekt obecnie działa na **Windows** (wykorzystuje polecenia specyficzne dla tego systemu)
+- Tylko **Windows** (polecenia systemowe, Opera GX, pywin32).
+- Rozpoznawanie mowy liczy na procesorze — od końca wypowiedzi do tekstu mija kilka sekund.
+- Wchodzenie w słowo najpewniej działa na słuchawkach; przy bardzo głośnych głośnikach Jarvis może Cię nie usłyszeć. Narzędzie w toku (np. szukanie w Spotify) kończy się przed przerwaniem.
+- Sterowanie Spotify wymaga konta **Premium**.
+- Temperatura procesora bez LibreHardwareMonitora jest niedostępna — HUD pokazuje wtedy temperaturę karty NVIDIA.
 
 ## 🔭 Plany rozwoju
 
-- Odpowiedzi głosowe asystenta (Text-to-Speech)
-- Wykrywanie ciszy zamiast stałego czasu nagrywania
+- Podpisany instalator (bez ostrzeżeń Windows)
+- Whisper na karcie graficznej (szybsze rozpoznawanie)
+- Temperatura procesora przez LibreHardwareMonitor
 
 ## 👤 Autor
 

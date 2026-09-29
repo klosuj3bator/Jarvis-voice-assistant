@@ -13,6 +13,14 @@ memory.json.tmp
 slownik.json
 slownik.json.tmp
 .spotify_cache_slownik
+# Historia rozmów z Jarvisem — prywatna
+pamiec.json
+pamiec.json.tmp
+
+# Pliki Obsidiana i wtyczki Claudian (notatki i rozmowy z edytora, nie kod Jarvisa)
+.obsidian/
+.claudian/
+*.base
 
 # Budowanie instalatora (instalator/zbuduj.py)
 build/

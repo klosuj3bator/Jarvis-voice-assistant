@@ -10,8 +10,12 @@
 ;     administratora; kto chce, może wybrać instalację dla wszystkich,
 ;   - wpis w menu Start (Jarvis + Odinstaluj Jarvisa),
 ;   - skrót na pulpicie (zaznaczony domyślnie, można odznaczyć),
-;   - autostart z Windowsem (odznaczony domyślnie) — wpis w rejestrze
-;     HKCU\...\Run, czyli tylko dla Ciebie, bez usług i Harmonogramu zadań,
+;   - autostart z Windowsem (odznaczony domyślnie) — zwykły skrót w Twoim
+;     folderze Autostart (shell:startup), bez usług i Harmonogramu zadań.
+;     Pierwsza wersja dopisywała się do rejestru (HKCU\...\Run) i Windows
+;     Defender uznał to za "wczepianie się" w system: wykrycie
+;     Behavior:Win32/Persistence.A!ml zaraz po instalacji (29.09). Skrót
+;     w Autostarcie widać i łatwo usunąć — tak robi wiele zwykłych programów,
 ;   - deinstalator (Ustawienia -> Aplikacje albo menu Start).
 ;
 ; CZEGO NIE ROBI
@@ -68,9 +72,14 @@ Source: "..\dist\Jarvis\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdir
 Name: "{group}\{#Nazwa}"; Filename: "{app}\{#Plik}"
 Name: "{group}\Odinstaluj Jarvisa"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#Nazwa}"; Filename: "{app}\{#Plik}"; Tasks: pulpit
+; Autostart — skrót w folderze Autostart (opis na górze pliku). Deinstalator
+; usuwa go razem z pozostałymi skrótami.
+Name: "{userstartup}\{#Nazwa}"; Filename: "{app}\{#Plik}"; Tasks: autostart
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#Nazwa}"; ValueData: """{app}\{#Plik}"""; Tasks: autostart; Flags: uninsdeletevalue
+; Sprzątanie po pierwszej wersji, która zapisywała autostart w rejestrze —
+; żeby po aktualizacji Jarvis nie startował dwa razy.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "{#Nazwa}"; Flags: deletevalue uninsdeletevalue
 
 [Run]
 Filename: "{app}\{#Plik}"; Description: "Uruchom Jarvisa"; Flags: nowait postinstall skipifsilent
