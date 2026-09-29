@@ -55,12 +55,12 @@ import re
 import threading
 
 import anthropic
-from dotenv import load_dotenv
 
 import app_launcher
 import briefing
 import email_monitor
 import kalendarz
+import konfiguracja
 import notes
 import pamiec
 import przegladarka
@@ -71,7 +71,7 @@ import spotify_controller
 import stan_komputera
 import system_control
 
-load_dotenv()
+konfiguracja.wczytaj()   # klucze: Ustawienia, potem .env — opis w konfiguracja.py
 
 logger = logging.getLogger(__name__)
 
@@ -1138,6 +1138,9 @@ def _zrzut_dla_kanalu(kanal, zdjecia):
     Zwraca: (komunikat dla modelu, czy_się_udało).
     """
     if kanal != "telegram":
+        if not konfiguracja.skonfigurowana("telegram"):
+            return (konfiguracja.komunikat_braku("telegram")
+                    + " Zrzuty ekranu wysyłam wyłącznie przez Telegram."), False
         return ("Zrzut ekranu działa tylko w rozmowie przez Telegram — "
                 "tam go wyślę jako zdjęcie."), False
 
@@ -1301,7 +1304,8 @@ _klient = None
 def _utworz_klienta():
     if not os.getenv("ANTHROPIC_API_KEY"):
         raise RuntimeError(
-            "Brak ANTHROPIC_API_KEY. Dopisz go do pliku .env obok tego skryptu."
+            "Brak klucza Anthropic. Wpisz go w kreatorze albo w Ustawieniach "
+            "Jarvisa (ikona przy zegarku)."
         )
     return anthropic.Anthropic()
 

@@ -55,9 +55,10 @@ import time
 from zoneinfo import ZoneInfo
 
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
+import konfiguracja
+
+konfiguracja.wczytaj()   # klucze: Ustawienia, potem .env — opis w konfiguracja.py
 
 logger = logging.getLogger(__name__)
 
@@ -304,8 +305,7 @@ def wydarzenia(dzien="dzisiaj", teraz=None):
     Zwraca: (komunikat dla modelu, czy_się_udało).
     """
     if not skonfigurowany():
-        return ("Kalendarz nie jest skonfigurowany — w .env brakuje "
-                "GOOGLE_CALENDAR_ICAL_URL."), False
+        return konfiguracja.komunikat_braku("kalendarz"), False
 
     teraz = teraz or datetime.datetime.now(STREFA)
     if teraz.tzinfo is None:            # briefing podaje czas bez strefy

@@ -93,17 +93,21 @@ from PySide6.QtQml import QQmlImageProviderBase
 from PySide6.QtQuick import QQuickImageProvider, QQuickView
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
+import sciezki  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
-KATALOG = os.path.dirname(os.path.abspath(__file__))
+# Ikona, scena i shader to części programu (sciezki.zasob): obok kodu albo
+# wewnątrz paczki z instalatora.
 
 # Ikona zasobnika i okna. Generujemy ją przy pierwszym uruchomieniu — podmień plik
 # na własną grafikę, kiedy będziesz miał lepszą (32x32 albo 64x64 PNG).
-SCIEZKA_IKONY = os.path.join(KATALOG, "jarvis_icon.png")
+# Instalator dostaje ją gotową (instalator/zbuduj.py).
+SCIEZKA_IKONY = sciezki.zasob("jarvis_icon.png")
 
 # Scena i shader. hud.frag to źródło shadera, a Qt wczytuje jego
 # skompilowaną wersję hud.frag.qsb (opis kompilacji na górze hud.frag).
-SCIEZKA_QML = os.path.join(KATALOG, "hud.qml")
+SCIEZKA_QML = sciezki.zasob("hud.qml")
 
 CZAS_BLYSKU_BLEDU_MS = 900   # jak długo trwa czerwony błysk, zanim wrócimy do idle
 
@@ -772,12 +776,14 @@ class TrayJarvisa:
         zabiłoby całą aplikację, mimo że ikona w zasobniku dalej by tam była.
     """
 
-    def __init__(self, app, okno, przy_zamknieciu=None):
+    def __init__(self, app, okno, przy_zamknieciu=None, przy_ustawieniach=None):
         """
-        app             — obiekt QApplication
-        okno            — pełnoekranowy HUD Jarvisa
-        przy_zamknieciu — opcjonalna funkcja sprzątająca, wołana przed wyjściem
-                          (main.py przekazuje tu zatrzymanie wątku nasłuchu)
+        app               — obiekt QApplication
+        okno              — pełnoekranowy HUD Jarvisa
+        przy_zamknieciu   — opcjonalna funkcja sprzątająca, wołana przed wyjściem
+                            (main.py przekazuje tu zatrzymanie wątku nasłuchu)
+        przy_ustawieniach — opcjonalna funkcja otwierająca okno Ustawień
+                            (setup_wizard.py); bez niej w menu nie ma tej pozycji
         """
         self._app = app
         self._okno = okno
@@ -799,6 +805,13 @@ class TrayJarvisa:
         # aboutToShow odpala się tuż przed pokazaniem menu, więc to dobre miejsce,
         # żeby napis zawsze zgadzał się z rzeczywistym stanem okna.
         self._menu.aboutToShow.connect(self._odswiez_napis)
+
+        # Klucze (Spotify, Telegram, Gmail...) — ten sam kreator co przy
+        # pierwszym uruchomieniu, z wypełnionymi polami.
+        if przy_ustawieniach is not None:
+            akcja_ustawienia = QAction("Ustawienia", self._menu)
+            akcja_ustawienia.triggered.connect(przy_ustawieniach)
+            self._menu.addAction(akcja_ustawienia)
 
         self._menu.addSeparator()
 
@@ -851,7 +864,11 @@ class TrayJarvisa:
         jeszcze chwilę po zamknięciu programu, jeśli nie ukryjemy jej jawnie.
         """
         logger.info("Zamykanie przez menu zasobnika.")
+        self.zamknij_program()
 
+    def zamknij_program(self):
+        """Sprząta, chowa ikonę i kończy pętlę zdarzeń. Woła to też main.py
+        przy ponownym uruchomieniu po zmianie Ustawień."""
         if self._przy_zamknieciu is not None:
             self._przy_zamknieciu()
 

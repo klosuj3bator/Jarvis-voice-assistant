@@ -12,12 +12,15 @@ import re
 import time
 
 import spotipy
-from dotenv import load_dotenv
 from spotipy.oauth2 import SpotifyOAuth
 
-# Wczytuje zmienne z pliku .env do zmiennych środowiskowych procesu.
-# Dzięki temu klucze API nie siedzą na sztywno w kodzie (i nie trafią na GitHuba).
-load_dotenv()
+import konfiguracja
+import sciezki
+
+# Wczytuje klucze do zmiennych środowiskowych procesu — z Ustawień Jarvisa,
+# a jeśli ich tam nie ma, z pliku .env (opis w konfiguracja.py). Dzięki temu
+# klucze API nie siedzą na sztywno w kodzie (i nie trafią na GitHuba).
+konfiguracja.wczytaj()
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +32,7 @@ SCOPE = "user-read-playback-state user-modify-playback-state"
 
 # Plik, w którym spotipy zapisze token po pierwszym zalogowaniu.
 # Dzięki niemu przeglądarka otworzy się tylko raz — potem token jest odświeżany automatycznie.
-CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".spotify_cache")
+CACHE_PATH = sciezki.dane(".spotify_cache")   # opis w sciezki.py
 
 
 def zaloguj():
@@ -421,6 +424,9 @@ def zagraj_piosenke(tytul, wykonawca=None):
     Flaga sukcesu jest potrzebna GUI — decyduje, czy koło wróci spokojnie
     do idle, czy błyśnie na czerwono.
     """
+    # Bez kluczy Spotify funkcja jest wyłączona — Jarvis mówi to wprost.
+    if not konfiguracja.skonfigurowana("spotify"):
+        return konfiguracja.komunikat_braku("spotify"), False
     sp = zaloguj()
 
     uri, opis = znajdz_utwor(sp, tytul, wykonawca)
@@ -449,6 +455,8 @@ def zagraj_album(nazwa_albumu, wykonawca=None):
 
     Zwraca: (komunikat dla użytkownika, czy się udało).
     """
+    if not konfiguracja.skonfigurowana("spotify"):
+        return konfiguracja.komunikat_braku("spotify"), False
     sp = zaloguj()
 
     uri, opis = znajdz_album(sp, nazwa_albumu, wykonawca)
@@ -663,6 +671,8 @@ def steruj_odtwarzaniem(polecenie):
 
     Zwraca: (komunikat, czy_się_udało).
     """
+    if not konfiguracja.skonfigurowana("spotify"):
+        return konfiguracja.komunikat_braku("spotify"), False
     funkcja = POLECENIA_ODTWARZANIA.get((polecenie or "").strip().lower())
     if funkcja is None:
         return (f"Nieznane polecenie odtwarzania: {polecenie!r}. "

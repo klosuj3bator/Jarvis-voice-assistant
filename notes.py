@@ -43,9 +43,12 @@ import logging
 import os
 import re
 
+import sciezki
+
 logger = logging.getLogger(__name__)
 
-KATALOG_NOTATEK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notatki")
+# Obok kodu albo, w wersji z instalatora, w %APPDATA%\Jarvis (opis w sciezki.py).
+KATALOG_NOTATEK = sciezki.dane("notatki")
 
 # Wzór linii z notatką: "- 18:45 — treść".
 # Rozpoznajemy go przy czytaniu, więc zwykły tekst dopisany ręcznie

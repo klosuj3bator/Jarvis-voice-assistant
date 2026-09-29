@@ -26,15 +26,28 @@ import psutil
 import pythoncom
 import win32com.client
 
+import sciezki
+
 logger = logging.getLogger(__name__)
 
-KATALOG = os.path.dirname(os.path.abspath(__file__))
+# Oba pliki to Twoje dane, więc leżą tam, gdzie reszta danych (sciezki.py):
+# obok kodu albo, w wersji z instalatora, w %APPDATA%\Jarvis.
 
 # Twoje ręczne wpisy — tego pliku program nigdy nie nadpisuje.
-SCIEZKA_CONFIGU = os.path.join(KATALOG, "apps_config.json")
+SCIEZKA_CONFIGU = sciezki.dane("apps_config.json")
 
 # Wpisy znalezione automatycznie — tym plikiem zarządza wyłącznie program.
-SCIEZKA_CACHE = os.path.join(KATALOG, "apps_cache.json")
+SCIEZKA_CACHE = sciezki.dane("apps_cache.json")
+
+# Szablon apps_config.json dla nowej instalacji: same notatki i przykład,
+# żadnych prawdziwych wpisów.
+SZABLON_CONFIGU = {
+    "_komentarz": "Mapowanie: nazwa, ktora wypowiesz -> sciezka do pliku .exe. Klucze "
+                  "zaczynajace sie od podkreslnika sa ignorowane (JSON nie ma komentarzy, "
+                  "wiec to nasz sposob na notatke). Nazwy pisz malymi literami. W sciezkach "
+                  "uzywaj podwojnych ukosnikow: C:\\\\Program Files\\\\...",
+    "_przyklad_jak_dopisac": {"notatnik": "C:\\Windows\\System32\\notepad.exe"},
+}
 
 # Foldery, w których Windows trzyma skróty Menu Start.
 # Pierwszy jest wspólny dla wszystkich użytkowników, drugi Twój prywatny.
@@ -175,7 +188,14 @@ def _wczytaj_json(sciezka, opis):
 def wczytaj_config():
     """Wczytuje ręczne wpisy użytkownika z apps_config.json."""
     if not os.path.exists(SCIEZKA_CONFIGU):
-        logger.error("Nie znalazłem pliku %s", SCIEZKA_CONFIGU)
+        # Nowa instalacja — zakładamy plik z notatką i przykładem, żeby było
+        # wiadomo, gdzie i jak dopisywać własne programy.
+        try:
+            with open(SCIEZKA_CONFIGU, "w", encoding="utf-8") as plik:
+                json.dump(SZABLON_CONFIGU, plik, indent=2, ensure_ascii=False)
+            logger.info("Utworzyłem pusty %s z przykładem.", SCIEZKA_CONFIGU)
+        except OSError as e:
+            logger.error("Nie udało się utworzyć %s: %s", SCIEZKA_CONFIGU, e)
         return {}
     return _wczytaj_json(SCIEZKA_CONFIGU, "apps_config.json")
 

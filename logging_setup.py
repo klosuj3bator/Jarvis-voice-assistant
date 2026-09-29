@@ -38,11 +38,13 @@ niczego — robi to raz main.py, wołając skonfiguruj_logowanie() poniżej.
 """
 
 import logging
-import os
 import sys
 from logging.handlers import RotatingFileHandler
 
-PLIK_LOGU = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis.log")
+import sciezki
+
+# Obok kodu albo, w wersji z instalatora, w %APPDATA%\Jarvis (opis w sciezki.py).
+PLIK_LOGU = sciezki.dane("jarvis.log")
 
 # Format jednej linii dziennika:
 #   2026-08-24 21:03:11 | INFO     | router          | watek-nasluchu | Rozpoznano: play_song

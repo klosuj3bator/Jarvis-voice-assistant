@@ -31,6 +31,8 @@ import wave
 import numpy as np
 import sounddevice as sd
 
+import modele
+import sciezki
 import slownik
 import zajetosc
 
@@ -513,6 +515,19 @@ def _utworz_detektor():
 
     logger.info("Przygotowuję detektor wake worda '%s'...", MODEL_WAKE_WORD)
 
+    # Wersja z instalatora (albo komplet w %APPDATA%): modele pobrał kreator
+    # do %APPDATA%\Jarvis\modele (opis w modele.py). Katalog biblioteki jest
+    # wtedy wewnątrz paczki, tylko do odczytu — nie ma go co odpytywać.
+    if modele.openwakeword_z_appdata():
+        detektor = WakeWordModel(
+            wakeword_models=[modele.plik_openwakeword(f"{MODEL_WAKE_WORD}_v0.1.onnx")],
+            melspec_model_path=modele.plik_openwakeword("melspectrogram.onnx"),
+            embedding_model_path=modele.plik_openwakeword("embedding_model.onnx"),
+            inference_framework="onnx",
+        )
+        logger.info("Detektor gotowy (modele z %s).", sciezki.MODELE)
+        return detektor
+
     # download_models() pobiera model + pliki pomocnicze (melspectrogram,
     # embedding, VAD). Wołamy ją TYLKO wtedy, gdy czegoś brakuje.
     #
@@ -611,9 +626,13 @@ def _wczytaj_model_whisper():
         # 1,4 s bez niego. Po restarcie komputera bywa znacznie gorzej —
         # jeśli sieć jeszcze nie wstała, zapytanie czeka na timeout,
         # a Jarvis stoi bezczynnie.
+        #
+        # modele.whisper() oddaje katalog z %APPDATA%\Jarvis\modele (wersja
+        # z instalatora) albo samą nazwę — wtedy faster-whisper bierze model
+        # z cache Hugging Face, jak dawniej.
         try:
             model = WhisperModel(
-                MODEL_WHISPER,
+                modele.whisper(MODEL_WHISPER),
                 device=URZADZENIE,
                 compute_type=COMPUTE_TYPE,
                 cpu_threads=WATKI_WHISPERA,
@@ -624,7 +643,7 @@ def _wczytaj_model_whisper():
             # uruchomieniu po instalacji. Wtedy (i tylko wtedy) sięgamy do sieci.
             logger.info("Modelu nie ma w cache — pobieram z internetu (jednorazowo)...")
             model = WhisperModel(
-                MODEL_WHISPER, device=URZADZENIE, compute_type=COMPUTE_TYPE,
+                modele.whisper(MODEL_WHISPER), device=URZADZENIE, compute_type=COMPUTE_TYPE,
                 cpu_threads=WATKI_WHISPERA,
             )
     except Exception as e:
@@ -664,13 +683,13 @@ def _wczytaj_model_potwierdzenia():
                 MODEL_POTWIERDZENIA)
     try:
         # Jak przy dużym modelu: najpierw z dysku, bez odpytywania sieci.
-        return WhisperModel(MODEL_POTWIERDZENIA, device="cpu", compute_type="int8",
-                            cpu_threads=2, local_files_only=True)
+        return WhisperModel(modele.whisper(MODEL_POTWIERDZENIA), device="cpu",
+                            compute_type="int8", cpu_threads=2, local_files_only=True)
     except Exception:
         logger.info("Modelu '%s' nie ma w cache — pobieram (jednorazowo, ~40 MB)...",
                     MODEL_POTWIERDZENIA)
-        return WhisperModel(MODEL_POTWIERDZENIA, device="cpu", compute_type="int8",
-                            cpu_threads=2)
+        return WhisperModel(modele.whisper(MODEL_POTWIERDZENIA), device="cpu",
+                            compute_type="int8", cpu_threads=2)
 
 
 def _bez_ogonkow(tekst):
@@ -1002,8 +1021,7 @@ def _rozpoznaj_mowe(audio, filtruj_cisze=True):
 # Folder jest w .gitignore, a najstarsze nagrania kasują się same.
 # Żeby wyłączyć zapisywanie, ustaw poniżej False.
 ZAPISUJ_NIEROZPOZNANE = True
-KATALOG_NIEROZPOZNANYCH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "nierozpoznane")
+KATALOG_NIEROZPOZNANYCH = sciezki.dane("nierozpoznane")   # opis w sciezki.py
 LIMIT_NIEROZPOZNANYCH = 10
 
 
@@ -1162,7 +1180,11 @@ def _przygotuj_vad():
 
         from openwakeword.vad import VAD
 
-        _vad = VAD()
+        # Wersja z instalatora: model VAD też leży w %APPDATA% (modele.py).
+        if modele.openwakeword_z_appdata():
+            _vad = VAD(model_path=modele.plik_openwakeword("silero_vad.onnx"))
+        else:
+            _vad = VAD()
         logger.info("Detektor mowy (VAD) gotowy.")
 
     return _vad

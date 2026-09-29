@@ -53,18 +53,23 @@ Uruchomienie w tle, bez konsoli:                     pythonw main.py
 """
 
 import logging
+import os
 import re
 import signal
+import subprocess
 import sys
 import threading
 
 from PySide6.QtWidgets import QApplication
 
 import gui
+import konfiguracja
 import zajetosc
 from logging_setup import PLIK_LOGU, skonfiguruj_logowanie
 
 logger = logging.getLogger(__name__)
+
+KATALOG = os.path.dirname(os.path.abspath(__file__))
 
 
 # --- Ciężkie moduły ładujemy LENIWIE ---------------------------------------
@@ -669,8 +674,8 @@ def petla_jarvisa(orb):
         reminders.uruchom(mow=tts.mow, ustaw_stan=orb.set_state,
                           stan_teraz=orb.stan_teraz)
 
-        # Rozmowa z telefonu — tylko jeśli w .env są dane bota Telegrama.
-        # Bez nich uruchom_z_env() po prostu nic nie robi.
+        # Rozmowa z telefonu — tylko jeśli Telegram jest skonfigurowany
+        # (Ustawienia albo .env). Bez tego uruchom_z_env() po prostu nic nie robi.
         most = telegram_bridge.uruchom_z_env(
             odpowiedz=agent.odpowiedz,
             przepisz=wake_word_listener.przepisz_nagranie,
@@ -726,6 +731,13 @@ def petla_jarvisa(orb):
 
 
 def main():
+    # Sprawdzenie zbudowanej paczki (instalator/zbuduj.py) — opis w autotest.py.
+    for argument in sys.argv[1:]:
+        if argument.startswith("--autotest="):
+            import autotest
+
+            return autotest.uruchom(argument.split("=", 1)[1])
+
     skonfiguruj_logowanie()
 
     logger.info("=" * 50)
@@ -760,6 +772,31 @@ def main():
     if _powiadom_dzialajaca_kopie():
         logger.info("Jarvis już działa — pokazuję jego okno zamiast startować drugi raz.")
         return 0
+
+    # KLUCZE: z Ustawień (%APPDATA%\Jarvis), a czego tam nie ma — z .env
+    # (opis w konfiguracja.py). Bez klucza Anthropic Jarvis nie ma mózgu,
+    # więc zanim cokolwiek wystartuje, prowadzi Cię przez kreator.
+    konfiguracja.wczytaj()
+    if not konfiguracja.skonfigurowana("anthropic"):
+        logger.info("Brak klucza Anthropic — uruchamiam kreator pierwszego uruchomienia.")
+        import setup_wizard
+
+        if not setup_wizard.uruchom_kreator(pierwsze=True):
+            logger.error("Kreator zamknięty bez klucza Anthropic — Jarvis nie wystartuje.")
+            return 1
+
+    # MODELE MOWY (tylko wersja z instalatora): kreator pobiera je przy
+    # pierwszym uruchomieniu. Gdy klucze są, a modeli nie ma (np. ktoś
+    # skasował folder), pokazujemy samo okno pobierania.
+    import modele
+
+    if modele.potrzebne_pobranie():
+        logger.info("Brak modeli mowy — pokazuję okno pobierania.")
+        import setup_wizard
+
+        if not setup_wizard.pobierz_modele():
+            logger.error("Okno pobierania zamknięte bez modeli — Jarvis nie wystartuje.")
+            return 1
 
     # Pełnoekranowy HUD. Zmienna nazywa się dalej "orb" — reszta pliku
     # woła na niej tylko set_state(), a ta metoda się nie zmieniła.
@@ -814,9 +851,25 @@ def main():
 
         wake_word_listener.zamknij()
 
+    # Ustawienia z menu ikony — ten sam kreator, z wypełnionymi polami.
+    # Nowy klucz Anthropic działa od następnego zdania; Telegram, Spotify
+    # i czujki poczty startują przy uruchomieniu, więc proponujemy restart.
+    ponowne_uruchomienie = threading.Event()
+
+    def ustawienia():
+        import setup_wizard
+
+        if not setup_wizard.uruchom_kreator(pierwsze=False):
+            return
+        if agent is not None:
+            agent._klient = None     # następne zapytanie utworzy klienta z nowym kluczem
+        if setup_wizard.zapytaj_o_restart():
+            ponowne_uruchomienie.set()
+            tray.zamknij_program()
+
     # Ikona w zasobniku. Referencję trzeba przechować w zmiennej, inaczej
     # garbage collector posprząta obiekt i ikona zniknie po ułamku sekundy.
-    tray = gui.TrayJarvisa(app, orb, przy_zamknieciu=posprzataj)
+    tray = gui.TrayJarvisa(app, orb, przy_zamknieciu=posprzataj, przy_ustawieniach=ustawienia)
 
     # Ctrl+C w aplikacji Qt: pętla zdarzeń Qt siedzi w kodzie C++ i nie oddaje
     # sterowania Pythonowi, więc domyślnie nie zauważyłby wciśnięcia Ctrl+C.
@@ -838,8 +891,31 @@ def main():
     # (Ctrl+C, wylogowanie użytkownika). posprzataj() jest idempotentne.
     posprzataj()
 
+    if ponowne_uruchomienie.is_set():
+        # Najpierw zamykamy kanał "jednej kopii" — inaczej nowa kopia
+        # zobaczyłaby, że Jarvis jeszcze działa, i od razu by się zamknęła.
+        serwer_kopii.close()
+        _uruchom_ponownie()
+
     logger.info("Jarvis zakończył pracę. Do zobaczenia!")
     return kod
+
+
+def _uruchom_ponownie():
+    """
+    Startuje nową kopię Jarvisa tym samym poleceniem, którym uruchomiono tę
+    (pythonw + Jarvis.pyw albo python + main.py). Woła to main() na samym
+    końcu, gdy mikrofon jest już zwolniony, a kanał "jednej kopii" zamknięty.
+    """
+    # W wersji z instalatora sys.executable to już Jarvis.exe, a sys.argv[0]
+    # to on sam — nie przekazujemy go drugi raz jako argumentu.
+    if getattr(sys, "frozen", False):
+        polecenie, katalog = [sys.executable, *sys.argv[1:]], os.path.dirname(sys.executable)
+    else:
+        polecenie, katalog = [sys.executable, *sys.argv], KATALOG
+    logger.info("Uruchamiam Jarvisa ponownie (%s).", " ".join(os.path.basename(p) for p in polecenie))
+    subprocess.Popen(polecenie, cwd=katalog,
+                     creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
 
 
 if __name__ == "__main__":

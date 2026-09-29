@@ -29,7 +29,8 @@ Asystent głosowy sterowany komendami mowy, inspirowany Jarvisem z filmów o Iro
 - 🔍 **Automatyczne wykrywanie zainstalowanych programów** — przeszukuje Menu Start i zapamiętuje lokalizacje
 - 📈 **Odczyty w rogu HUD-a** — procesor, pamięć, prędkość sieci (z zapamiętanym szczytem) i temperatura z limitem
 - 💫 **Wizualny interfejs** — pulsujące, świecące okienko reagujące na stan asystenta (nasłuchuje / przetwarza / błąd)
-- 📌 **Działanie w tle** — ikona w zasobniku systemowym
+- 📌 **Działanie w tle** — ikona w zasobniku systemowym, w jej menu **Ustawienia** (klucze)
+- 🧭 **Kreator pierwszego uruchomienia** — wymagany tylko klucz Anthropic, reszta opcjonalna; każdy klucz sprawdzany od razu, zapis w `%APPDATA%\Jarvis`
 
 ## 🧠 Jak to działa
 
@@ -70,7 +71,13 @@ pip install -r requirements.txt
 
 ## ⚙️ Konfiguracja
 
-Stwórz plik `.env` w głównym folderze na podstawie `.env.example` i uzupełnij własnymi kluczami:
+Przy pierwszym uruchomieniu otworzy się **kreator**: wymagany jest tylko klucz Anthropic, a Spotify, Telegram, Gmail i kalendarz możesz pominąć. Przy każdym kluczu jest instrukcja i link, skąd go wziąć, a przycisk „Sprawdź i dalej” łączy się z usługą, zanim puści Cię dalej. Później to samo okno otwierasz z menu ikony przy zegarku: **Ustawienia**. Podgląd bez Jarvisa: `python setup_wizard.py`.
+
+Klucze zapisują się w `%APPDATA%\Jarvis\config.env`, nie w folderze programu. Funkcje bez kluczy są wyłączone — Jarvis mówi wtedy wprost, że dana funkcja nie jest skonfigurowana.
+
+**Plik `.env` dalej działa** (wzór: `.env.example`). Kolejność, od najważniejszego: zmienne środowiskowe Windows → Ustawienia (`%APPDATA%`) → `.env`. Kreator nigdy nie zmienia `.env`; wyłączenie funkcji w Ustawieniach zapisuje pusty klucz w `%APPDATA%`, który wygrywa z `.env`.
+
+Poniżej to samo, co mówi kreator — gdybyś wolał wpisać klucze do `.env` ręcznie:
 
 SPOTIPY_CLIENT_ID=twoj_client_id
 SPOTIPY_CLIENT_SECRET=twoj_client_secret
@@ -126,6 +133,38 @@ GMAIL_APP_PASSWORD=haslo_aplikacji
 3. Uruchom Jarvisa ponownie.
 
 Skrzynka jest otwierana **tylko do odczytu** — Jarvis nie oznacza maili jako przeczytane, niczego nie usuwa i nie wysyła. Widzi tylko nadawcę, temat i godzinę, bez treści maila. Czujki sprawdzają pocztę co 5 minut; o każdym mailu powiadamiają tylko raz (tekstem i głosówką na Telegram, więc wymagają skonfigurowanego Telegrama). Reguły są zapisane w `email_watches.json`.
+
+## 📦 Budowanie instalatora
+
+Instalator `JarvisSetup.exe` dla innych osób buduje jedno polecenie:
+
+```bash
+python instalator/zbuduj.py
+```
+
+Potrzebne raz, przed pierwszym budowaniem:
+
+```bash
+pip install pyinstaller
+```
+
+```bash
+winget install JRSoftware.InnoSetup
+```
+
+Skrypt robi po kolei:
+
+1. **Ikona** — `build/jarvis.ico` w stylu HUD-a.
+2. **Pakowanie** — PyInstaller w trybie folderu (`instalator/jarvis.spec`) → `dist/Jarvis/`. Tryb folderu, a nie jednego pliku, bo jeden plik przy każdym starcie rozpakowywałby kilkaset MB do folderu tymczasowego.
+3. **Prywatność** — `instalator/sprawdz_paczke.py` szuka w paczce Twoich plików (`.env`, tokeny Spotify, `memory.json`, notatki, przypomnienia, dziennik, cache, modele) oraz **prawdziwych wartości Twoich kluczy** we wszystkich plikach, także w skompilowanym kodzie wewnątrz `Jarvis.exe`. Jeśli coś znajdzie, instalator nie powstaje.
+4. **Autotest** — uruchamia zbudowany `Jarvis.exe --autotest` na czystym, tymczasowym `%APPDATA%` i sprawdza, czy działają Qt, silnik Whispera, dźwięk, strefy czasowe i HTTPS.
+5. **Instalator** — Inno Setup (`instalator/jarvis.iss`) → `dist/JarvisSetup.exe`.
+
+Numer wersji zmieniasz w `wersja.py`. `build/`, `dist/` i gotowy instalator są w `.gitignore`.
+
+**Co dostaje osoba instalująca:** Jarvisa w Programach (bez uprawnień administratora), skrót na pulpicie, wpis w menu Start, opcjonalny autostart z Windowsem i deinstalator. Przy pierwszym uruchomieniu kreator prosi o klucze i pobiera modele mowy (ok. 560 MB) do `%APPDATA%\Jarvis\modele` — instalator ich nie zawiera. Wszystkie dane (klucze, pamięć, notatki, dziennik) trzyma w `%APPDATA%\Jarvis`; deinstalator pyta, czy je usunąć. Windows może ostrzec przed nieznanym wydawcą, bo instalator nie jest podpisany certyfikatem — wtedy „Więcej informacji” → „Uruchom mimo to”.
+
+Wersja uruchamiana z kodu (`python main.py`) działa jak dawniej: dane trzyma obok kodu, a modele bierze z cache Hugging Face.
 
 ## ▶️ Użycie
 

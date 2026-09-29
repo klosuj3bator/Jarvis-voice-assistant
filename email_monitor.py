@@ -70,14 +70,15 @@ import threading
 import time
 import uuid
 
-from dotenv import load_dotenv
+import konfiguracja
+import sciezki
 
-load_dotenv()
+konfiguracja.wczytaj()   # klucze: Ustawienia, potem .env — opis w konfiguracja.py
 
 logger = logging.getLogger(__name__)
 
 SERWER = "imap.gmail.com"
-SCIEZKA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_watches.json")
+SCIEZKA = sciezki.dane("email_watches.json")
 
 # Co ile minut czujki zaglądają do skrzynki.
 CO_ILE_MIN = 5
@@ -93,7 +94,10 @@ MAKS_WYNIKOW = 10
 MAKS_PAMIETANYCH = 1000
 
 # Powitanie w powiadomieniach — tak, jak sobie życzyłeś.
-POWITANIE = "Witaj Macieju"
+#
+# Z Ustawień/.env (JARVIS_POWITANIE), bo instalowany Jarvis trafia do różnych
+# ludzi — "Witaj Macieju" nie może witać każdego.
+POWITANIE = os.getenv("JARVIS_POWITANIE") or "Cześć"
 
 # Tak zaczyna się wynik wyszukiwania, gdy znaleziono jakiekolwiek maile.
 # agent.py rozpoznaje po nim, że do modelu trafiły dane z poczty,
@@ -230,8 +234,7 @@ def szukaj(slowa=None, nadawca=None, godzin=24, wszystkie_slowa=False):
     temat i godzinę — nigdy treść maili.
     """
     if not skonfigurowany():
-        return ("Poczta nie jest skonfigurowana — w .env brakuje GMAIL_ADDRESS "
-                "albo GMAIL_APP_PASSWORD."), False
+        return konfiguracja.komunikat_braku("gmail"), False
 
     try:
         godzin = max(0.1, min(float(godzin or 24), 24 * 30))
@@ -301,6 +304,14 @@ def _opis_czujki(c):
 
 def dodaj_czujke(nadawca=None, slowa=None, wszystkie_slowa=False):
     """Dodaje regułę "daj znać, jak przyjdzie mail…". Zwraca (komunikat, ok)."""
+    # Czujka potrzebuje dwóch rzeczy: skrzynki, do której zagląda, i Telegrama,
+    # przez który daje znać. Bez którejkolwiek byłaby martwa — więc odmawiamy.
+    if not skonfigurowany():
+        return konfiguracja.komunikat_braku("gmail"), False
+    if not konfiguracja.skonfigurowana("telegram"):
+        return (konfiguracja.komunikat_braku("telegram")
+                + " Czujki na maile powiadamiają właśnie przez Telegram."), False
+
     nadawca = _oczysc(nadawca, 80) if nadawca else None
     slowa = [_oczysc(s, 50) for s in (slowa or []) if _oczysc(s, 50)][:10]
     if not nadawca and not slowa:
@@ -314,8 +325,7 @@ def dodaj_czujke(nadawca=None, slowa=None, wszystkie_slowa=False):
         _zapisz(dane)
 
     logger.info("[POCZTA] nowa czujka: %s", _opis_czujki(czujka))
-    uwaga = "" if skonfigurowany() else " (Uwaga: poczta nie jest jeszcze skonfigurowana w .env.)"
-    return f"Będę pilnować maili ({_opis_czujki(czujka)}).{uwaga}", True
+    return f"Będę pilnować maili ({_opis_czujki(czujka)}).", True
 
 
 def lista_czujek():
@@ -422,7 +432,7 @@ def uruchom(odbiorcy):
     """
     global _watek
     if not skonfigurowany():
-        logger.info("Poczta wyłączona — brak GMAIL_ADDRESS albo GMAIL_APP_PASSWORD w .env.")
+        logger.info("Poczta wyłączona — Gmail nie jest skonfigurowany (Ustawienia albo .env).")
         return None
     if _watek is not None and _watek.is_alive():
         return _watek

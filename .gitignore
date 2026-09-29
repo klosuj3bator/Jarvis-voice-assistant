@@ -13,3 +13,8 @@ memory.json.tmp
 slownik.json
 slownik.json.tmp
 .spotify_cache_slownik
+
+# Budowanie instalatora (instalator/zbuduj.py)
+build/
+dist/
+JarvisSetup*.exe

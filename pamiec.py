@@ -50,11 +50,13 @@ import re
 import threading
 from datetime import datetime
 
+import sciezki
+
 logger = logging.getLogger(__name__)
 
-KATALOG = os.path.dirname(os.path.abspath(__file__))
-SCIEZKA_PAMIECI = os.path.join(KATALOG, "pamiec.json")    # końcówka rozmowy
-SCIEZKA_FAKTOW = os.path.join(KATALOG, "memory.json")     # pamięć długoterminowa
+# Obok kodu albo, w wersji z instalatora, w %APPDATA%\Jarvis (opis w sciezki.py).
+SCIEZKA_PAMIECI = sciezki.dane("pamiec.json")    # końcówka rozmowy
+SCIEZKA_FAKTOW = sciezki.dane("memory.json")     # pamięć długoterminowa
 
 # Ile ostatnich wiadomości z poprzedniej rozmowy odtwarzamy przy starcie.
 # Za mało — Jarvis gubi wątek. Za dużo — każde zapytanie niesie ze sobą

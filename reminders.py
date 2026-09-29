@@ -42,11 +42,13 @@ import re
 import threading
 import uuid
 
+import sciezki
 import zajetosc
 
 logger = logging.getLogger(__name__)
 
-SCIEZKA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reminders.json")
+# Obok kodu albo, w wersji z instalatora, w %APPDATA%\Jarvis (opis w sciezki.py).
+SCIEZKA = sciezki.dane("reminders.json")
 
 # Co ile sekund wątek sprawdza zegar. Dwie sekundy to kompromis: dokładność
 # wystarczająca dla przypomnień (nikt nie mierzy nimi sekund), a procesor

@@ -66,17 +66,17 @@ import re
 import threading
 from collections import Counter
 
-from dotenv import load_dotenv
-
+import konfiguracja
 import pamiec
+import sciezki
 
-load_dotenv()
+konfiguracja.wczytaj()   # klucze: Ustawienia, potem .env — opis w konfiguracja.py
 
 logger = logging.getLogger(__name__)
 
-KATALOG = os.path.dirname(os.path.abspath(__file__))
-SCIEZKA = os.path.join(KATALOG, "slownik.json")
-SCIEZKA_TOKENU_SPOTIFY = os.path.join(KATALOG, ".spotify_cache_slownik")
+# Obok kodu albo, w wersji z instalatora, w %APPDATA%\Jarvis (opis w sciezki.py).
+SCIEZKA = sciezki.dane("slownik.json")
+SCIEZKA_TOKENU_SPOTIFY = sciezki.dane(".spotify_cache_slownik")
 
 # Tylko odczyt: co ostatnio grało i kogo obserwujesz.
 UPRAWNIENIA_SPOTIFY = "user-read-recently-played user-follow-read"
@@ -182,7 +182,7 @@ def _z_aplikacji():
     nazwy = []
     for plik in ("apps_config.json", "apps_cache.json"):
         try:
-            with open(os.path.join(KATALOG, plik), encoding="utf-8") as f:
+            with open(sciezki.dane(plik), encoding="utf-8") as f:
                 dane = json.load(f)
         except (OSError, ValueError):
             continue
@@ -241,8 +241,8 @@ def _ze_spotify():
     Zwraca: (wykonawcy_ostatnio, obserwowani, albumy, opis_stanu).
     Najczęściej słuchani pierwsi.
     """
-    if not os.getenv("SPOTIPY_CLIENT_ID"):
-        return [], [], [], "brak kluczy Spotify w .env"
+    if not konfiguracja.skonfigurowana("spotify"):
+        return [], [], [], "Spotify nie jest skonfigurowany"
     try:
         sp = _klient_spotify()
         if sp is None:

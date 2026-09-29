@@ -16,9 +16,12 @@ import os
 import sys
 
 # Przy dwukliku katalog roboczy bywa inny niż folder programu, a Jarvis
-# szuka .env, pamięci i konfiguracji obok siebie.
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.getcwd())
+# szuka .env, pamięci i konfiguracji obok siebie. W wersji z instalatora
+# (PyInstaller, Jarvis.exe) nie ma to znaczenia — wszystkie ścieżki są
+# pełne (sciezki.py) — więc tam katalogu nie zmieniamy.
+if not getattr(sys, "frozen", False):
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.getcwd())
 
 import main  # noqa: E402
 

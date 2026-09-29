@@ -77,12 +77,12 @@ import threading
 import time
 
 import requests
-from dotenv import load_dotenv
 
+import konfiguracja
 import pamiec
 import system_control
 
-load_dotenv()
+konfiguracja.wczytaj()   # klucze: Ustawienia, potem .env — opis w konfiguracja.py
 
 logger = logging.getLogger(__name__)
 
@@ -672,8 +672,7 @@ def uruchom_z_env(odpowiedz, przepisz=None, synteza_ogg=None,
     token = os.getenv("TELEGRAM_JARVIS_TOKEN", "").strip()
     wlasciciel = os.getenv("TELEGRAM_OWNER_ID", "").strip()
     if not token or not wlasciciel:
-        logger.info("Telegram wyłączony — brak TELEGRAM_JARVIS_TOKEN "
-                    "albo TELEGRAM_OWNER_ID w .env.")
+        logger.info("Telegram wyłączony — nie jest skonfigurowany (Ustawienia albo .env).")
         return None
 
     try:
