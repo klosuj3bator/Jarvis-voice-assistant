@@ -126,7 +126,7 @@ Funkcje bez kluczy są wyłączone — Jarvis mówi wtedy wprost, że dana funkc
 
 ## 💰 Koszty
 
-Jarvis korzysta z płatnego API Anthropic (model Claude Sonnet 5, z cache promptów). Orientacyjnie: zwykłe zdanie w rozmowie to ok. **0,3–0,4 centa**, pierwsze zdanie po dłuższej przerwie ok. 3 centów, pytanie wymagające wyszukiwania w internecie (np. pogoda) 3–7 centów. Koszt każdego zapytania i suma od startu są zapisywane w `jarvis.log`. Wątki w tle (przypomnienia, czujki poczty) nie wywołują Claude.
+Jarvis korzysta z płatnego API Anthropic (model Claude Sonnet 5, z cache promptów). Z prawdziwego używania (dziennik Jarvisa): zwykłe zdanie w rozmowie to **0,3–0,6 centa**, polecenie z narzędziem (np. „puść album…”) ok. 1 centa, pierwsze zdanie po uruchomieniu albo dłuższej przerwie 4–7 centów (wtedy instrukcje zapisują się do cache), pytanie z wyszukiwaniem w internecie ok. 4 centów. Sesja z kilkunastoma poleceniami kosztuje zwykle 10–20 centów. Koszt każdego zapytania i suma od startu są zapisywane w `jarvis.log`. Wątki w tle (przypomnienia, czujki poczty) nie wywołują Claude.
 
 ## 🧠 Jak to działa
 
