@@ -67,6 +67,20 @@ generować, nic więcej nie zostaje wysłane) i wyrzuca z kolejki to, co
 jeszcze czekało. W historii rozmowy zostaje ślad, że odpowiedź przerwano,
 a to, co Jarvis zdążył przygotować, czeka osobno — napisz "dokończ",
 a podejmie wątek (tak samo jak przy wejściu w słowo na głos, agent.py).
+
+
+KOMENDY: ZDALNE PROGRAMOWANIE
+=============================
+
+    /kod <polecenie>   — Claude Code zmienia kod Jarvisa (w tle, wynik przyjdzie sam)
+    /zatwierdz [opis]  — commit tego, co zmieniły zadania /kod
+    /cofnij            — wycofanie niezatwierdzonych zmian z zadań /kod
+    /restart           — Jarvis uruchamia się od nowa; strażnik wraca do
+                         ostatniej działającej wersji, jeśli nowa nie wstanie
+
+Opis w zdalny_kod.py i straznik.py. Komendy działają tylko jako TEKST od
+właściciela (głosówka nigdy nie jest komendą) i nie przechodzą przez agenta
+— model nie ma jak sam zlecić zadania Claude Code.
 """
 
 import io
@@ -83,6 +97,7 @@ import requests
 import konfiguracja
 import pamiec
 import system_control
+import zdalny_kod
 
 konfiguracja.wczytaj()   # klucze: Ustawienia, potem .env — opis w konfiguracja.py
 
@@ -144,6 +159,30 @@ def _to_stop(tekst):
     return re.sub(r"[^a-z]", "", (tekst or "").lower()) == "stop"
 
 
+def _komenda(tekst):
+    """
+    "/kod popraw literówki" -> ("kod", "popraw literówki"), zwykły tekst -> (None, "").
+
+    Telegram w grupach dokleja nazwę bota ("/kod@JarvisBot") — odcinamy ją.
+    "zatwierdź" z polską literą też rozumiemy.
+    """
+    dopasowanie = re.match(r"^/([A-Za-ząćęłńóśźżĄĆĘŁŃÓŚŹŻ_]+)(?:@\w+)?(?:\s+(.*))?$",
+                           tekst.strip(), re.S)
+    if not dopasowanie:
+        return None, ""
+    nazwa = dopasowanie.group(1).lower().replace("ź", "z")
+    return nazwa, (dopasowanie.group(2) or "").strip()
+
+
+POMOC = ("Cześć! Pisz albo nagrywaj głosówki — przekażę je Jarvisowi. "
+         "„stop” przerywa odpowiedź, która właśnie powstaje.\n\n"
+         "Zdalne programowanie:\n"
+         "/kod <polecenie> — Claude Code zmienia kod Jarvisa\n"
+         "/zatwierdz [opis] — commit zmian z /kod\n"
+         "/cofnij — wycofanie niezatwierdzonych zmian z /kod\n"
+         "/restart — uruchomienie nowej wersji (z powrotem do działającej, gdyby nie wstała)")
+
+
 # Co zapisujemy w historii zamiast odpowiedzi, której nie wysłaliśmy.
 PRZERWANA_ODPOWIEDZ = ("[PRZERWANE: użytkownik napisał „stop”, zanim cokolwiek "
                        "wysłałem — nie dokończyłem odpowiedzi.]")
@@ -185,13 +224,19 @@ class MostTelegram:
     """
 
     def __init__(self, token, wlasciciel, odpowiedz, przepisz=None,
-                 synteza_ogg=None, wykonaj_systemowe=None, pomijane_zdania=()):
+                 synteza_ogg=None, wykonaj_systemowe=None, pomijane_zdania=(), restart=None):
         self._token = token
         self._wlasciciel = int(wlasciciel)
         self._odpowiedz = odpowiedz
         self._przepisz = przepisz
         self._synteza_ogg = synteza_ogg
         self._wykonaj_systemowe = wykonaj_systemowe
+        # /restart: funkcja z main.py, która zamyka Jarvisa i uruchamia
+        # strażnika (straznik.py). Bez niej komenda odpowiada, że niedostępna.
+        self._restart = restart
+        # Chwila startu mostu — "/restart" wysłane przed nią pochodzi z czasów
+        # poprzedniej kopii Jarvisa i nie może zrestartować tej (pętla restartów).
+        self._start = time.time()
         # Zapowiedzi w rodzaju "Już szukam." mają sens tylko w głośniku,
         # gdzie wypełniają ciszę. W wiadomości tekstowej to tylko śmieci.
         self._pomijane = set(pomijane_zdania)
@@ -376,22 +421,26 @@ class MostTelegram:
     def _wykonaj(self, wiadomosc, przerwanie):
         """Jedna wiadomość z kolejki (już sprawdzona w _obsluz)."""
         if "text" in wiadomosc:
-            self._obsluz_tekst(wiadomosc["text"], przerwanie)
+            self._obsluz_tekst(wiadomosc["text"], przerwanie, wiadomosc.get("date", 0))
         elif "voice" in wiadomosc or "audio" in wiadomosc:
             self._obsluz_glos(wiadomosc.get("voice") or wiadomosc["audio"], przerwanie)
         else:
             self._wyslij_tekst("Rozumiem tekst i wiadomości głosowe — tego jeszcze nie.")
 
-    def _obsluz_tekst(self, tekst, przerwanie):
+    def _obsluz_tekst(self, tekst, przerwanie, kiedy=0):
         tekst = tekst.strip()
 
         if self._obsluz_potwierdzenie(tekst):
             return
 
-        # Polecenia samego Telegrama, np. /start przy pierwszym uruchomieniu bota.
+        # Komendy (opis w nagłówku modułu). Reszta — np. /start przy pierwszym
+        # uruchomieniu bota — dostaje listę komend.
         if tekst.startswith("/"):
-            self._wyslij_tekst("Cześć! Pisz albo nagrywaj głosówki — przekażę je Jarvisowi. "
-                               "„stop” przerywa odpowiedź, która właśnie powstaje.")
+            nazwa, reszta = _komenda(tekst)
+            if nazwa in ("kod", "zatwierdz", "cofnij", "restart"):
+                self._komenda_kodu(nazwa, reszta, kiedy)
+            else:
+                self._wyslij_tekst(POMOC)
             return
 
         # Hasło wysłane w wiadomości nie może zostać w jarvis.log (opis w pamiec.py).
@@ -427,6 +476,65 @@ class MostTelegram:
 
         logger.info("[TELEGRAM] [TY głosem] %s", pamiec.ukryj_jesli_sekret(tekst))
         self._rozmawiaj(tekst, przerwanie, uslyszane=tekst)
+
+    def _komenda_kodu(self, nazwa, reszta, kiedy):
+        """/kod, /zatwierdz, /cofnij, /restart — opis w zdalny_kod.py i straznik.py."""
+        logger.info("[TELEGRAM] /%s %s", nazwa, pamiec.ukryj_jesli_sekret(reszta)[:200])
+        if nazwa == "restart":
+            self._komenda_restart(kiedy)
+            return
+
+        self._status("typing")
+        try:
+            if nazwa == "kod":
+                # Od razu "zaczynam", wynik przyjdzie sam (_wynik_kodu).
+                odpowiedz = zdalny_kod.zlec(reszta, self._wynik_kodu)
+            elif nazwa == "zatwierdz":
+                odpowiedz = zdalny_kod.zatwierdz(reszta)
+            else:
+                odpowiedz = zdalny_kod.cofnij()
+        except zdalny_kod.BladKodu as e:
+            odpowiedz = f"⚠️ {e}"
+        self._wyslij_tekst(odpowiedz)
+
+    def _wynik_kodu(self, tekst):
+        """Wynik zadania /kod — przychodzi z wątku zadania, gdy Claude Code skończy."""
+        try:
+            self._wyslij_tekst(tekst)
+        except BladTelegrama as e:
+            logger.warning("[TELEGRAM] Nie wysłałem wyniku /kod: %s", e)
+
+    def _komenda_restart(self, kiedy):
+        # Telegram podaje czas w pełnych sekundach — porównujemy też pełne.
+        if kiedy and kiedy < int(self._start):
+            logger.info("[TELEGRAM] Pomijam /restart wysłane przed startem tej kopii.")
+            return
+        if self._restart is None:
+            self._wyslij_tekst("Restart z telefonu jest teraz niedostępny.")
+            return
+        if zdalny_kod.trwa():
+            self._wyslij_tekst("Trwa zadanie /kod — restart przerwałby je w połowie. "
+                               "Napisz /restart, gdy przyjdzie wynik.")
+            return
+        self._wyslij_tekst("🔄 Restartuję się. Jeśli nowa wersja nie wstanie w minutę, wrócę "
+                           "do ostatniej działającej i dam Ci znać.")
+        self._potwierdz_odebrane()
+        self._restart()
+
+    def _potwierdz_odebrane(self):
+        """
+        Potwierdza Telegramowi odebrane wiadomości PRZED zamknięciem Jarvisa.
+
+        Telegram uznaje wiadomość za odebraną dopiero przy NASTĘPNYM pytaniu
+        o nowe (offset). Bez tego nowa kopia Jarvisa dostałaby to samo
+        "/restart" jeszcze raz — i restartowałaby się w kółko.
+        """
+        if self._offset is None:
+            return
+        try:
+            self._api("getUpdates", offset=self._offset, timeout=0, limit=1)
+        except BladTelegrama as e:
+            logger.warning("[TELEGRAM] Nie potwierdziłem odebranych wiadomości: %s", e)
 
     def _obsluz_potwierdzenie(self, tekst):
         """
@@ -670,8 +778,23 @@ class MostTelegram:
 _most = None
 
 
+def _z_env():
+    """(token, ID właściciela) z Ustawień albo .env, albo None — z wpisem do dziennika."""
+    token = os.getenv("TELEGRAM_JARVIS_TOKEN", "").strip()
+    wlasciciel = os.getenv("TELEGRAM_OWNER_ID", "").strip()
+    if not token or not wlasciciel:
+        logger.info("Telegram wyłączony — nie jest skonfigurowany (Ustawienia albo .env).")
+        return None
+    try:
+        return token, int(wlasciciel)
+    except ValueError:
+        logger.error("TELEGRAM_OWNER_ID musi być liczbą (Twoim ID z Telegrama). "
+                     "Most do Telegrama NIE wystartował.")
+        return None
+
+
 def uruchom_z_env(odpowiedz, przepisz=None, synteza_ogg=None,
-                  wykonaj_systemowe=None, pomijane_zdania=()):
+                  wykonaj_systemowe=None, pomijane_zdania=(), restart=None):
     """
     Uruchamia most, jeśli w .env są TELEGRAM_JARVIS_TOKEN i TELEGRAM_OWNER_ID.
 
@@ -682,23 +805,23 @@ def uruchom_z_env(odpowiedz, przepisz=None, synteza_ogg=None,
     """
     global _most
 
-    token = os.getenv("TELEGRAM_JARVIS_TOKEN", "").strip()
-    wlasciciel = os.getenv("TELEGRAM_OWNER_ID", "").strip()
-    if not token or not wlasciciel:
-        logger.info("Telegram wyłączony — nie jest skonfigurowany (Ustawienia albo .env).")
+    dane = _z_env()
+    if dane is None:
         return None
-
-    try:
-        wlasciciel = int(wlasciciel)
-    except ValueError:
-        logger.error("TELEGRAM_OWNER_ID musi być liczbą (Twoim ID z Telegrama). "
-                     "Most do Telegrama NIE wystartował.")
-        return None
-
-    _most = MostTelegram(token, wlasciciel, odpowiedz, przepisz, synteza_ogg,
-                         wykonaj_systemowe, pomijane_zdania)
+    _most = MostTelegram(dane[0], dane[1], odpowiedz, przepisz, synteza_ogg,
+                         wykonaj_systemowe, pomijane_zdania, restart)
     _most.uruchom()
     return _most
+
+
+def wyslij_wlascicielowi(tekst):
+    """
+    Jedna wiadomość do Ciebie, bez uruchamiania mostu — dla strażnika
+    restartu (straznik.py), który działa, gdy Jarvisa akurat nie ma.
+    """
+    dane = _z_env()
+    if dane is not None:
+        MostTelegram(dane[0], dane[1], odpowiedz=None)._wyslij_tekst(tekst)
 
 
 def zatrzymaj():

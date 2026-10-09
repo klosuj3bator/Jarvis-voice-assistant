@@ -281,13 +281,15 @@ class Wypowiedz:
     niewypowiedziane: str = ""
 
 
-def mow_strumieniowo(generator_zdan, na_start=None, przerwanie=None):
+def mow_strumieniowo(generator_zdan, na_start=None, przerwanie=None, na_zdanie=None):
     """
     Wypowiada zdania z generatora, przygotowując kolejne w tle.
 
     generator_zdan — generator oddający całe zdania (np. z agent.odpowiedz)
     na_start       — opcjonalna funkcja wołana tuż przed pierwszym dźwiękiem
                      (main.py przełącza tym kulę na stan "speaking")
+    na_zdanie      — opcjonalna funkcja(zdanie), wołana, gdy zdanie zaczyna
+                     brzmieć (zapis rozmowy w panelu bocznym — panel.py)
     przerwanie     — opcjonalny threading.Event. Gdy ktoś go ustawi (i zawoła
                      przerwij()), mowa milknie w pół zdania, a funkcja wraca
                      z tym, co zdążyło zabrzmieć — patrz WEJŚCIE W SŁOWO niżej.
@@ -431,6 +433,11 @@ def mow_strumieniowo(generator_zdan, na_start=None, przerwanie=None):
 
             _aktualne_zdanie = zdanie
             ostatnie = numer
+            if na_zdanie is not None:
+                try:
+                    na_zdanie(zdanie)
+                except Exception:
+                    logger.exception("Odbiorca zdania zawiódł")
             start = time.monotonic()
             sd.play(audio, czestotliwosc)
             if przerwano():

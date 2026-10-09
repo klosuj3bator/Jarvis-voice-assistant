@@ -34,13 +34,35 @@ def uruchom(plik_wyniku):
         import konfiguracja, modele, notes, pamiec, przegladarka, reminders  # noqa: F401,E401
         import schowek, setup_wizard, slownik, spotify_controller, stan_komputera  # noqa: F401,E401
         import system_control, telegram_bridge, tts, wake_word_listener  # noqa: F401,E401
+        import akcje, panel, pasek_boczny, powitanie, rozruch, tapeta  # noqa: F401,E401
+        import straznik, zdalny_kod  # noqa: F401,E401
         return "wszystkie moduły Jarvisa się importują"
+
+    def claude_code_tylko_z_telegrama():
+        # Claude Code uruchamia wyłącznie komenda /kod od właściciela
+        # (opis w zdalny_kod.py) — agent nie może mieć do niego drogi.
+        # Bez inspect.getsource — w paczce z instalatora nie ma plików .py.
+        import agent
+        import zdalny_kod
+        if any(getattr(v, "__name__", "") == "zdalny_kod" for v in vars(agent).values()):
+            raise AssertionError("agent.py importuje zdalny_kod")
+        nazwy = [n["name"] for n in agent.NARZEDZIA]
+        podejrzane = [n for n in nazwy if "claude" in n.lower() or "kod" in n.lower()]
+        if podejrzane:
+            raise AssertionError(f"narzędzia agenta wyglądają na Claude Code: {podejrzane}")
+        polecenie = zdalny_kod.polecenie_claude()
+        for zakazane in ("--dangerously-skip-permissions", "bypassPermissions"):
+            if any(zakazane in czesc for czesc in polecenie):
+                raise AssertionError(f"polecenie Claude Code zawiera {zakazane}")
+        if polecenie[polecenie.index("--permission-mode") + 1] != "acceptEdits":
+            raise AssertionError("Claude Code nie w trybie acceptEdits")
+        return f"agent ma {len(nazwy)} narzędzi, żadne nie uruchamia Claude Code"
 
     def sciezki():
         import os
 
         import sciezki as s
-        brak = [p for p in ("hud.qml", "hud.frag.qsb", "jarvis_icon.png")
+        brak = [p for p in ("hud.qml", "Panel.qml", "hud.frag.qsb", "jarvis_icon.png")
                 if not os.path.exists(s.zasob(p))]
         if brak:
             raise FileNotFoundError(f"brak w paczce: {brak}")
@@ -90,7 +112,8 @@ def uruchom(plik_wyniku):
         requests.head("https://huggingface.co", timeout=15)
         return "HTTPS działa (certyfikaty w paczce)"
 
-    for nazwa, funkcja in (("moduły", moduly), ("zasoby", sciezki), ("strefa czasowa", strefa),
+    for nazwa, funkcja in (("moduły", moduly), ("Claude Code", claude_code_tylko_z_telegrama),
+                           ("zasoby", sciezki), ("strefa czasowa", strefa),
                            ("dźwięk", dzwiek), ("Qt", okno_qt), ("modele", modele_mowy),
                            ("sieć", siec)):
         _proba(wyniki, nazwa, funkcja)

@@ -52,6 +52,8 @@ Uruchomienie w tle, bez konsoli:                     pythonw main.py
                                                      albo uruchom_jarvis.vbs
 """
 
+import atexit
+import json
 import logging
 import os
 import re
@@ -61,12 +63,22 @@ import sys
 import threading
 import time
 
+from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtWidgets import QApplication
 
 import gui
 import konfiguracja
+import panel
+import pasek_boczny
+import rozruch
+import tapeta
 import zajetosc
+import zdalny_kod
 from logging_setup import PLIK_LOGU, skonfiguruj_logowanie
+
+# tapeta i pasek_boczny są tu, na górze, a nie w środku main(): rozruch
+# importuje moduły w osobnych wątkach, a dwa wątki importujące naraz to
+# niepotrzebne ryzyko. Te dwa są lekkie — Qt i tak już jest wczytane.
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +105,11 @@ KATALOG = os.path.dirname(os.path.abspath(__file__))
 # że "kula się nie pokazuje": ona jeszcze nie istniała.
 #
 # Teraz na górze pliku zostaje tylko Qt i gui. Kula pojawia się od razu,
-# a resztę dociąga wątek roboczy w tle, już przy widocznej, pulsującej kuli.
-# Łączny czas startu się nie skrócił — ale przestał być ślepy.
+# a resztę dociąga rozruch w tle, już przy widocznej, pulsującej kuli.
+#
+# Od 01.10 rozruch (rozruch.py) ładuje moduły i modele RÓWNOLEGLE i rusza,
+# zanim powstanie okno — start skrócił się z 8,9 do ok. 4,5 s (na rozgrzanym
+# komputerze), a HUD pokazuje postęp: "Uruchamianie systemów… 64 %".
 
 agent = None
 email_monitor = None
@@ -105,48 +120,43 @@ telegram_bridge = None
 tts = None
 wake_word_listener = None
 
+# Rozruch tego uruchomienia — tworzy go main() (opis w rozruch.py).
+_rozruch = None
+
+# /restart z Telegrama — funkcję ustawia main(), a pętla Jarvisa przekazuje
+# ją mostowi do Telegrama (opis w straznik.py).
+_restart_z_telefonu = None
+
+# Co Jarvis mówi, gdy wszystko jest gotowe.
+SYSTEMY_GOTOWE = "Systemy gotowe."
+
 
 def zaladuj_moduly():
     """
-    Importuje ciężkie moduły. Wołane z wątku roboczego, nie z głównego.
+    Czeka na rozruch i rozkłada gotowe moduły do zmiennych tego pliku.
+    Wołane z wątku roboczego, nie z głównego.
 
-    Zwykły `import` w Pythonie jest tani przy drugim wywołaniu (moduł ląduje
-    w sys.modules), więc nie ma znaczenia, że robimy to w środku funkcji —
-    koszt płacimy raz, a zyskujemy kontrolę nad tym, KIEDY go zapłacimy.
+    Bez rozruchu (np. w testach) startuje go tutaj i czeka na niego od razu.
     """
     global agent, email_monitor, pamiec, reminders, system_control, telegram_bridge, tts
-    global wake_word_listener
+    global wake_word_listener, _rozruch
 
     if wake_word_listener is not None:
         return
+    if _rozruch is None:
+        import rozruch
 
-    import time as _time
-    poczatek = _time.time()
-    logger.info("Ładuję moduły w tle...")
+        _rozruch = rozruch.Rozruch().start()
 
-    # agent ciagnie za soba spotify_controller, app_launcher i przegladarke,
-    # wiec nie importujemy ich tu osobno. system_control tez przez niego
-    # przychodzi, ale main.py wola go wprost (potwierdzanie restartu),
-    # wiec bierzemy do niego wlasna referencje.
-    import agent as _agent
-    import email_monitor as _email_monitor
-    import pamiec as _pamiec
-    import reminders as _reminders
-    import system_control as _system_control
-    import telegram_bridge as _telegram_bridge
-    import tts as _tts
-    import wake_word_listener as _wake_word_listener
-
-    agent = _agent
-    email_monitor = _email_monitor
-    pamiec = _pamiec
-    reminders = _reminders
-    system_control = _system_control
-    telegram_bridge = _telegram_bridge
-    tts = _tts
-    wake_word_listener = _wake_word_listener
-
-    logger.info("Moduły załadowane w %.1f s.", _time.time() - poczatek)
+    moduly = _rozruch.czekaj()
+    agent = moduly["agent"]
+    email_monitor = moduly["email_monitor"]
+    pamiec = moduly["pamiec"]
+    reminders = moduly["reminders"]
+    system_control = moduly["system_control"]
+    telegram_bridge = moduly["telegram_bridge"]
+    tts = moduly["tts"]
+    wake_word_listener = moduly["wake_word_listener"]
 
 # Ile sekund po odpowiedzi Jarvis czeka, aż zaczniesz mówić dalej.
 # Jeśli nikt się nie odezwie, wraca do czuwania i znowu trzeba "Hey Jarvis".
@@ -486,7 +496,7 @@ def _odpowiedz(orb, tekst, historia_rozmowy, po_wake_wordzie=True, wszedl_w_slow
     try:
         wypowiedz = tts.mow_strumieniowo(
             tylko_zdania(), na_start=lambda: orb.set_state("speaking"),
-            przerwanie=przerwanie,
+            przerwanie=przerwanie, na_zdanie=panel.jarvis,
         )
     finally:
         # Mikrofon musi wrócić do tego wątku, zanim cokolwiek z niego przeczytamy.
@@ -504,6 +514,7 @@ def _odpowiedz(orb, tekst, historia_rozmowy, po_wake_wordzie=True, wszedl_w_slow
         uciete = bool(reszta) or bool(stan.get("przerwane"))
         if uciete:
             logger.info("[JARVIS] (przerwane) %s", wypowiedz.powiedziane or "—")
+            panel.przerwano()
             historia_rozmowy = agent.oznacz_przerwane(
                 historia_rozmowy, wypowiedz.powiedziane,
                 "ktoś zaczął mówić (tryb słuchawek)" if kazda_mowa
@@ -627,13 +638,16 @@ def rozmowa(orb, pierwszy_tekst):
             continue
 
         pustych_z_rzedu = 0
-        # Hasło powiedziane na głos nie może zostać w jarvis.log (opis w pamiec.py).
+        # Hasło powiedziane na głos nie może zostać w jarvis.log (opis w pamiec.py)
+        # ani na panelu bocznym, który widać z drugiego końca pokoju.
         logger.info("[TY] %s", pamiec.ukryj_jesli_sekret(tekst))
+        panel.ty(pamiec.ukryj_jesli_sekret(tekst))
 
         # "Nie słuchaj" kończy rozmowę od razu, bez pytania modelu —
         # opis przy ZWROTY_PRZESTAN_SLUCHAC.
         if _kaze_przestac_sluchac(tekst):
             logger.info("Polecenie przestania słuchania — wracam do czuwania.")
+            panel.jarvis(ODPOWIEDZ_NA_PRZESTAN)
             tts.mow(ODPOWIEDZ_NA_PRZESTAN)
             historia_rozmowy = historia_rozmowy + [
                 {"role": "user", "content": tekst},
@@ -734,9 +748,18 @@ def petla_jarvisa(orb):
     # zabiłby ten wątek po cichu: kula dalej by pulsowała, ikona wisiałaby
     # w zasobniku, a Jarvis po prostu przestałby słuchać, bez śladu na ekranie.
     try:
-        # Pierwsza rzecz w wątku roboczym: dociągnięcie ciężkich modułów.
-        # Kula już wtedy pulsuje na ekranie, więc czekanie jest widoczne.
+        # Pierwsza rzecz w wątku roboczym: zaczekać na rozruch (moduły
+        # i modele). HUD pokazuje w tym czasie postęp "Uruchamianie systemów…".
         zaladuj_moduly()
+
+        # Mikrofon (bez niego "Systemy gotowe" byłoby nieprawdą — przy braku
+        # mikrofonu HUD pokaże "brak mikrofonu" i czeka na niego tutaj).
+        wake_word_listener.przygotuj(orb.set_state)
+        orb.set_state("idle")
+        # Bibliotekę do rozmowy z Claude dociągamy w tle — opis w rozruch.py.
+        _rozruch.rozgrzej()
+        logger.info("[ROZRUCH] %s", SYSTEMY_GOTOWE)
+        tts.mow(SYSTEMY_GOTOWE)
 
         # Przypomnienia pilnuje osobny wątek — musi działać także wtedy, gdy
         # ten tutaj czeka na "Hey Jarvis". Startuje dopiero teraz, bo mówi
@@ -754,6 +777,7 @@ def petla_jarvisa(orb):
             synteza_ogg=tts.synteza_ogg,
             wykonaj_systemowe=system_control.wykonaj,
             pomijane_zdania={agent.KOMUNIKAT_WYSZUKIWANIA, *agent.ZAPOWIEDZI.values()},
+            restart=_restart_z_telefonu,
         )
         if most is not None:
             reminders.dodaj_odbiorce(most.powiadom)
@@ -765,6 +789,11 @@ def petla_jarvisa(orb):
         elif email_monitor.skonfigurowany():
             logger.info("Czujki na maile czekają na Telegram — bez niego nie ma "
                         "dokąd wysyłać powiadomień. Wyszukiwanie maili działa.")
+
+        # Wszystko wstało: znacznik dla strażnika (gdy to restart z Telegrama),
+        # a po kilkunastu sekundach ten kod zostaje zapamiętany jako ostatnia
+        # działająca wersja (opis w zdalny_kod.py).
+        zdalny_kod.gotowy()
 
         while not wake_word_listener.czy_zatrzymano():
             logger.info("=== TRYB: CZUWANIE (czekam na 'Hey Jarvis') ===")
@@ -802,13 +831,46 @@ def petla_jarvisa(orb):
     logger.info("Pętla nasłuchu zakończona.")
 
 
+class _WatekGUI(QObject):
+    """
+    Wykonuje funkcję w wątku GUI na prośbę z innego wątku (np. Telegrama).
+
+    Sygnał wysłany z obcego wątku Qt dostarcza w kolejce — slot wykona się
+    w wątku, w którym żyje ten obiekt, czyli głównym. A tylko tam wolno
+    zamykać okna i kończyć pętlę zdarzeń.
+    """
+
+    zlecenie = Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.zlecenie.connect(self._wykonaj)
+
+    @Slot(object)
+    def _wykonaj(self, funkcja):
+        funkcja()
+
+
 def main():
+    global _rozruch, _restart_z_telefonu
+
     # Sprawdzenie zbudowanej paczki (instalator/zbuduj.py) — opis w autotest.py.
     for argument in sys.argv[1:]:
         if argument.startswith("--autotest="):
             import autotest
 
             return autotest.uruchom(argument.split("=", 1)[1])
+        # Strażnik /restart z Telegrama — osobny proces bez okna (straznik.py).
+        if argument == "--straznik":
+            import straznik
+
+            return straznik.uruchom()
+        # Deinstalator zabija Jarvisa bez sprzątania — potem woła go z tym
+        # argumentem, żeby na pulpicie nie została ostatnia klatka tapety.
+        if argument == "--przywroc-pulpit":
+            tapeta.przywroc_pulpit()
+            pasek_boczny.usun_stary_pasek()
+            return 0
 
     skonfiguruj_logowanie()
 
@@ -845,6 +907,10 @@ def main():
         logger.info("Jarvis już działa — pokazuję jego okno zamiast startować drugi raz.")
         return 0
 
+    # Migawka kodu, z którym startujemy — jeśli ta kopia wstanie, zostanie
+    # "ostatnią działającą wersją" dla /restart (opis w zdalny_kod.py).
+    zdalny_kod.zapamietaj_start()
+
     # KLUCZE: z Ustawień (%APPDATA%\Jarvis), a czego tam nie ma — z .env
     # (opis w konfiguracja.py). Bez klucza Anthropic Jarvis nie ma mózgu,
     # więc zanim cokolwiek wystartuje, prowadzi Cię przez kreator.
@@ -870,10 +936,33 @@ def main():
             logger.error("Okno pobierania zamknięte bez modeli — Jarvis nie wystartuje.")
             return 1
 
+    # ROZRUCH: moduły i modele ładują się w tle już teraz — równolegle ze sobą
+    # i z budową okna HUD-a poniżej (opis w rozruch.py).
+    _rozruch = rozruch.Rozruch().start()
+
     # Pełnoekranowy HUD. Zmienna nazywa się dalej "orb" — reszta pliku
     # woła na niej tylko set_state(), a ta metoda się nie zmieniła.
     orb = gui.JarvisHUD()
-    orb.pokaz()
+    orb.set_state("uruchamianie")
+    _rozruch.sluchaj(orb.pokaz_postep)
+
+    # Poprzednie uruchomienie zginęło jako tapeta (awaria, zabity proces)?
+    # Najpierw sprzątamy jego ostatnią klatkę z pulpitu (opis w tapeta.py).
+    tapeta.przywroc_pulpit()
+    if konfiguracja.tryb_tapety():
+        orb.ustaw_tapete(True, konfiguracja.monitor_tapety())
+    else:
+        orb.pokaz()
+    # Awaryjnie, gdyby Python kończył się bez naszego sprzątania na dole main().
+    atexit.register(orb.zakoncz)
+
+    # PANEL BOCZNY: pasek na drugim monitorze albo wysuwany z HUD-a (opis
+    # w pasek_boczny.py). Najpierw zwalniamy miejsce po pasku z poprzedniego
+    # uruchomienia, jeśli to zginęło, nie sprzątając po sobie.
+    pasek_boczny.usun_stary_pasek()
+    sterownik_panelu = pasek_boczny.SterownikPanelu(orb)
+    atexit.register(sterownik_panelu.zakoncz)
+    panel.uruchom()
 
     # Nasłuch próśb od kolejnych uruchomień. Referencję trzymamy w zmiennej,
     # inaczej garbage collector posprzątałby serwer razem z nasłuchem.
@@ -931,19 +1020,45 @@ def main():
     def ustawienia():
         import setup_wizard
 
-        if not setup_wizard.uruchom_kreator(pierwsze=False):
+        zmiany = setup_wizard.uruchom_kreator(pierwsze=False)
+        if not zmiany:
             return
+        # Nowy monitor tapety i ustawienia panelu działają od razu, bez restartu.
+        if konfiguracja.MONITOR_TAPETY in zmiany and orb.jest_tapeta():
+            orb.ustaw_tapete(True, konfiguracja.monitor_tapety())
+        if any(nazwa.startswith("JARVIS_PANEL") or nazwa == konfiguracja.POGODA_MIASTO
+               for nazwa in zmiany):
+            sterownik_panelu.zastosuj()
         if agent is not None:
             agent._klient = None     # następne zapytanie utworzy klienta z nowym kluczem
-        if setup_wizard.zapytaj_o_restart():
+        if set(zmiany) - konfiguracja.BEZ_RESTARTU and setup_wizard.zapytaj_o_restart():
             ponowne_uruchomienie.set()
             tray.zamknij_program()
+
+    def tryb_tapety(wlaczony):
+        """Przełącznik z menu przy zegarku: zapis w Ustawieniach i zmiana od razu."""
+        konfiguracja.ustaw_tryb_tapety(wlaczony)
+        orb.ustaw_tapete(wlaczony, konfiguracja.monitor_tapety())
+
+    # /restart z Telegrama: zamykamy się jak z menu, a na końcu main()
+    # zamiast zwykłego ponownego uruchomienia startuje strażnik.
+    restart_ze_straznikiem = threading.Event()
+    watek_gui = _WatekGUI()
+
+    def restart_z_telefonu():
+        """Wołane z wątku Telegrama — samo zamknięcie dzieje się w wątku GUI."""
+        logger.info("Restart z Telegrama — zamykam się, resztą zajmie się strażnik.")
+        restart_ze_straznikiem.set()
+        watek_gui.zlecenie.emit(lambda: tray.zamknij_program())
+
+    _restart_z_telefonu = restart_z_telefonu
 
     # Ikona w zasobniku. Referencję trzeba przechować w zmiennej, inaczej
     # garbage collector posprząta obiekt i ikona zniknie po ułamku sekundy.
     tray = gui.TrayJarvisa(app, orb, przy_zamknieciu=posprzataj, przy_ustawieniach=ustawienia,
                            czy_tryb_sluchawek=konfiguracja.tryb_sluchawek,
-                           ustaw_tryb_sluchawek=konfiguracja.ustaw_tryb_sluchawek)
+                           ustaw_tryb_sluchawek=konfiguracja.ustaw_tryb_sluchawek,
+                           ustaw_tryb_tapety=tryb_tapety, panel_boczny=sterownik_panelu)
 
     # Ctrl+C w aplikacji Qt: pętla zdarzeń Qt siedzi w kodzie C++ i nie oddaje
     # sterowania Pythonowi, więc domyślnie nie zauważyłby wciśnięcia Ctrl+C.
@@ -961,18 +1076,45 @@ def main():
     kod = app.exec()
     budzik.zamknij()
 
+    # Tapeta schodzi z pulpitu razem z Jarvisem — inaczej zostałaby na nim
+    # ostatnia klatka HUD-a (opis w tapeta.py). Pasek boczny zwalnia miejsce
+    # przy krawędzi monitora (opis w pasek_boczny.py).
+    orb.zakoncz()
+    sterownik_panelu.zakoncz()
+    panel.zatrzymaj()
+
     # Zabezpieczenie na wypadek zamknięcia inną drogą niż menu zasobnika
     # (Ctrl+C, wylogowanie użytkownika). posprzataj() jest idempotentne.
     posprzataj()
 
-    if ponowne_uruchomienie.is_set():
+    if restart_ze_straznikiem.is_set() or ponowne_uruchomienie.is_set():
         # Najpierw zamykamy kanał "jednej kopii" — inaczej nowa kopia
         # zobaczyłaby, że Jarvis jeszcze działa, i od razu by się zamknęła.
         serwer_kopii.close()
-        _uruchom_ponownie()
+        if restart_ze_straznikiem.is_set():
+            _uruchom_straznika()
+        else:
+            _uruchom_ponownie()
 
     logger.info("Jarvis zakończył pracę. Do zobaczenia!")
     return kod
+
+
+def _polecenie_uruchomienia():
+    """(polecenie, katalog), którym uruchomiono tę kopię Jarvisa."""
+    # W wersji z instalatora sys.executable to już Jarvis.exe, a sys.argv[0]
+    # to on sam — nie przekazujemy go drugi raz jako argumentu.
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *sys.argv[1:]], os.path.dirname(sys.executable)
+    return [sys.executable, *sys.argv], KATALOG
+
+
+def _bez_konsoli(python):
+    """python.exe -> pythonw.exe: kopia startowana w tle nie potrzebuje okna konsoli."""
+    w_tle = os.path.join(os.path.dirname(python), "pythonw.exe")
+    if os.path.basename(python).lower() == "python.exe" and os.path.exists(w_tle):
+        return w_tle
+    return python
 
 
 def _uruchom_ponownie():
@@ -981,15 +1123,37 @@ def _uruchom_ponownie():
     (pythonw + Jarvis.pyw albo python + main.py). Woła to main() na samym
     końcu, gdy mikrofon jest już zwolniony, a kanał "jednej kopii" zamknięty.
     """
-    # W wersji z instalatora sys.executable to już Jarvis.exe, a sys.argv[0]
-    # to on sam — nie przekazujemy go drugi raz jako argumentu.
-    if getattr(sys, "frozen", False):
-        polecenie, katalog = [sys.executable, *sys.argv[1:]], os.path.dirname(sys.executable)
-    else:
-        polecenie, katalog = [sys.executable, *sys.argv], KATALOG
+    polecenie, katalog = _polecenie_uruchomienia()
     logger.info("Uruchamiam Jarvisa ponownie (%s).", " ".join(os.path.basename(p) for p in polecenie))
     subprocess.Popen(polecenie, cwd=katalog,
                      creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+
+
+def _uruchom_straznika():
+    """
+    /restart z Telegrama: zapisuje, co i jak uruchomić, i startuje strażnika
+    (straznik.py), który uruchomi nową kopię i sprawdzi, czy wstała.
+    """
+    import psutil
+
+    polecenie, katalog = _polecenie_uruchomienia()
+    if not getattr(sys, "frozen", False):
+        polecenie = [_bez_konsoli(polecenie[0]), *polecenie[1:]]
+    os.makedirs(zdalny_kod.FOLDER, exist_ok=True)
+    with open(zdalny_kod.PLIK_RESTARTU, "w", encoding="utf-8") as plik:
+        json.dump({"pid": os.getpid(), "utworzony": psutil.Process().create_time(),
+                   "polecenie": polecenie, "katalog": katalog}, plik, ensure_ascii=False)
+
+    if getattr(sys, "frozen", False):
+        straznik = [sys.executable, "--straznik"]
+    else:
+        straznik = [_bez_konsoli(sys.executable), os.path.join(KATALOG, "main.py"), "--straznik"]
+    logger.info("Uruchamiam strażnika restartu.")
+    subprocess.Popen(straznik, cwd=katalog, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL,
+                     env=konfiguracja.srodowisko_bez_kluczy(tylko_z_plikow=True),
+                     creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                     | zdalny_kod.BEZ_OKNA)
 
 
 if __name__ == "__main__":

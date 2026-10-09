@@ -12,6 +12,7 @@ SKĄD NAZWY (w kolejności ważności)
 
   1. Twoje ręczne wpisy — "Jarvis, zapamiętaj słowo Tarcho Terror"
      (narzędzie add_vocabulary_word w agent.py)
+     oraz nazwy kont Gmail ("praca", "mariancyc") — "sprawdź pocztę na koncie…"
   2. Nazwy własne z pamięci długoterminowej (memory.json)
   3. Spotify: 10 wykonawców, których ostatnio słuchałeś najczęściej
   4. Aplikacje z apps_config.json i apps_cache.json
@@ -316,11 +317,20 @@ def _odswiez_w_tle():
     _watek_odswiezania.start()
 
 
+def _z_kont_poczty():
+    """
+    Nazwy kont Gmail ("praca", "mariancyc") — prosto z ustawień, bez czekania
+    na dzienne odświeżanie. Bez nich Whisper słyszy "Marian Cyc" zamiast
+    "mariancyc", a dopasowanie konta w email_monitor.py musi zgadywać.
+    """
+    return [nazwa for konto in konfiguracja.konta_gmail() for nazwa in konto["nazwy"]]
+
+
 def _zbuduj(dane):
     """Nazwy w kolejności ważności, bez powtórzeń, przycięte do MAKS_ZNAKOW."""
     auto = dane.get("automatyczne") or {}
     wykonawcy = auto.get("spotify_wykonawcy", [])
-    kolejnosc = ([r["slowo"] for r in dane.get("reczne", [])]
+    kolejnosc = ([r["slowo"] for r in dane.get("reczne", [])] + _z_kont_poczty()
                  + auto.get("pamiec", []) + wykonawcy[:CZOLOWKA_WYKONAWCOW]
                  + auto.get("aplikacje", []) + auto.get("spotify_obserwowani", [])
                  + wykonawcy[CZOLOWKA_WYKONAWCOW:] + auto.get("spotify_albumy", []))

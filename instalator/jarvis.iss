@@ -87,6 +87,10 @@ Filename: "{app}\{#Plik}"; Description: "Uruchom Jarvisa"; Flags: nowait postins
 [UninstallRun]
 ; Jarvis działa w tle (ikona przy zegarku) — zamykamy go, zanim usuniemy pliki.
 Filename: "{sys}\taskkill.exe"; Parameters: "/IM {#Plik} /F"; Flags: runhidden; RunOnceId: "ZamknijJarvisa"
+; Zabity w trybie tapety zostawiłby na pulpicie swoją ostatnią klatkę —
+; Jarvis.exe z tym argumentem tylko sprząta pulpit i od razu się kończy
+; (opis w tapeta.py).
+Filename: "{app}\{#Plik}"; Parameters: "--przywroc-pulpit"; Flags: runhidden; RunOnceId: "PrzywrocPulpit"
 
 [Code]
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

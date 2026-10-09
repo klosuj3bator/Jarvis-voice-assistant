@@ -50,10 +50,10 @@ from dataclasses import dataclass, field
 
 import requests
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen
-from PySide6.QtWidgets import (QApplication, QDialog, QFormLayout, QFrame, QHBoxLayout,
-                               QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
-                               QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPen
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame,
+                               QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                               QProgressBar, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
 import konfiguracja
 import modele
@@ -209,13 +209,12 @@ def wykryj_wlasciciela(token, stop, limit_s=120):
     return None, "Nic nie przyszło. Napisz do bota i kliknij „Wykryj” jeszcze raz."
 
 
-def sprawdz_gmail(w):
+def _sprawdz_konto_gmail(adres, haslo):
     """Logowanie IMAP tylko do odczytu — dokładnie tak, jak robi to email_monitor.py."""
-    adres, haslo = w["GMAIL_ADDRESS"], w["GMAIL_APP_PASSWORD"]
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", adres):
-        return False, "To nie wygląda na adres e-mail."
+        return False, "to nie wygląda na adres e-mail."
     if len(haslo) != 16:
-        return False, ("Hasło aplikacji ma 16 liter (Google pokazuje je w czterech grupach "
+        return False, ("hasło aplikacji ma 16 liter (Google pokazuje je w czterech grupach "
                        "— spacje możesz zostawić). To nie jest zwykłe hasło do konta.")
     try:
         imap = imaplib.IMAP4_SSL("imap.gmail.com", 993, timeout=20)
@@ -231,9 +230,35 @@ def sprawdz_gmail(w):
         return False, ("Gmail odrzucił logowanie. Sprawdź adres i użyj HASŁA APLIKACJI, "
                        "nie zwykłego hasła do konta.")
     except OSError:
-        return False, "Nie mogę połączyć się z Gmailem — sprawdź internet."
-    return True, ("Działa — skrzynka otwarta tylko do odczytu. Google może przysłać maila "
-                  "o nowym logowaniu; to normalne.")
+        return False, "nie mogę połączyć się z Gmailem — sprawdź internet."
+    return True, ""
+
+
+def sprawdz_gmail(w):
+    """Każde wpisane konto osobno; błąd mówi, które konto i co z nim jest nie tak."""
+    dzialajace = []
+    for numer in range(1, konfiguracja.MAKS_KONT_GMAIL + 1):
+        zm_nazwa, zm_adres, zm_haslo = konfiguracja.zmienne_konta(numer)
+        adres, haslo = w.get(zm_adres, ""), w.get(zm_haslo, "")
+        if not adres and not haslo:
+            if w.get(zm_nazwa):
+                return False, f"Konto {numer}: jest nazwa, ale brak adresu i hasła."
+            continue
+        if not adres or not haslo:
+            return False, f"Konto {numer}: wpisz i adres, i hasło aplikacji."
+        ok, problem = _sprawdz_konto_gmail(adres, haslo)
+        if not ok:
+            return False, f"Konto {numer}: {problem}"
+        nazwy = [n.strip() for n in w.get(zm_nazwa, "").split(",") if n.strip()]
+        dzialajace.append((numer, (nazwy or [adres.split("@")[0]])[0]))
+
+    domyslne = w.get(konfiguracja.GMAIL_DOMYSLNE) or "1"
+    if int(domyslne) not in [n for n, _ in dzialajace]:
+        return False, f"Domyślne konto {domyslne} nie jest wpisane — wybierz jedno z wpisanych."
+    opis = ", ".join(f"„{nazwa}”" + (" (domyślne)" if str(n) == domyslne else "")
+                     for n, nazwa in dzialajace)
+    return True, (f"Działa: {opis} — skrzynki otwarte tylko do odczytu. Google może przysłać "
+                  "maila o nowym logowaniu; to normalne.")
 
 
 def sprawdz_kalendarz(w):
@@ -269,6 +294,9 @@ class Pole:
     etykieta: str
     tajne: bool = True
     podpowiedz: str = ""
+    wymagane: bool = True        # puste blokuje "Sprawdź i dalej"
+    zapas: str = ""              # zmienna, z której wypełnić pole, gdy własnej brak (stary zapis)
+    wybor: tuple = ()            # zamiast pola tekstowego — lista do wyboru
 
 
 @dataclass
@@ -280,10 +308,39 @@ class Strona:
     pola: list
     sprawdz: object              # funkcja(wartości) -> (ok, komunikat)
     popraw: dict = field(default_factory=dict)   # zmienna -> funkcja czyszcząca wpis
+    # >0: pola w siatce po tyle w wierszu (np. Gmail: nazwa | adres | hasło,
+    # wiersz na konto); pola ponad pełne wiersze idą pod siatkę, jak zwykle.
+    kolumny: int = 0
+    wiersze: tuple = ()          # podpisy wierszy siatki, np. ("KONTO 1", ...)
+    # Wartości zapisywane razem ze stroną (po udanym sprawdzeniu i przy "Wyłącz").
+    dodatkowe: dict = field(default_factory=dict)
 
 
 def _link(adres, tekst):
     return f'<a href="{adres}" style="color:#ffba40; text-decoration:none;">{tekst} ↗</a>'
+
+
+def _pola_gmail():
+    """Siatka kont Gmail: nazwa | adres | hasło aplikacji, plus konto domyślne."""
+    pola = []
+    for numer in range(1, konfiguracja.MAKS_KONT_GMAIL + 1):
+        nazwa, adres, haslo = konfiguracja.zmienne_konta(numer)
+        pierwsze = numer == 1
+        pola += [
+            Pole(nazwa, "Nazwy (opcjonalnie)", tajne=False, wymagane=False,
+                 podpowiedz="np. prywatne" if pierwsze else "np. praca"),
+            # Konto 1 wypełnia się starym zapisem z .env (GMAIL_ADDRESS), jeśli jest.
+            Pole(adres, "Adres Gmail", tajne=False, wymagane=pierwsze, podpowiedz="ty@gmail.com",
+                 zapas=konfiguracja.STARE_KONTO_GMAIL[0] if pierwsze else ""),
+            Pole(haslo, "Hasło aplikacji", wymagane=pierwsze, podpowiedz="xxxx xxxx xxxx xxxx",
+                 zapas=konfiguracja.STARE_KONTO_GMAIL[1] if pierwsze else ""),
+        ]
+    pola.append(Pole(konfiguracja.GMAIL_DOMYSLNE, "Domyślne konto", tajne=False, wymagane=False,
+                     wybor=tuple(str(n) for n in range(1, konfiguracja.MAKS_KONT_GMAIL + 1))))
+    return pola
+
+
+_POLA_GMAIL = _pola_gmail()
 
 
 STRONY = [
@@ -325,16 +382,23 @@ STRONY = [
         popraw={"TELEGRAM_OWNER_ID": lambda s: s.strip()}),
     Strona(
         "gmail", "Gmail",
-        "Szukanie maili („czy przyszło coś od Allegro?”) i czujki na nowe maile "
-        "z powiadomieniem na Telegram. Skrzynka tylko do odczytu.",
-        "1. Na koncie Google włącz weryfikację dwuetapową (bez niej hasła aplikacji są niedostępne).<br>"
-        f"2. Otwórz {_link('https://myaccount.google.com/apppasswords', 'Hasła aplikacji')}, "
-        "utwórz hasło o nazwie „Jarvis”.<br>"
-        "3. Wklej 16-literowe hasło aplikacji — <b>nie</b> zwykłe hasło do konta.",
-        [Pole("GMAIL_ADDRESS", "Adres Gmail", tajne=False, podpowiedz="ty@gmail.com"),
-         Pole("GMAIL_APP_PASSWORD", "Hasło aplikacji", podpowiedz="xxxx xxxx xxxx xxxx")],
+        "Szukanie maili i czujki z powiadomieniem na Telegram — do trzech kont, "
+        "tylko do odczytu. Bez wskazania konta Jarvis sprawdza wszystkie.",
+        "Dla każdego konta: włącz weryfikację dwuetapową, otwórz "
+        f"{_link('https://myaccount.google.com/apppasswords', 'Hasła aplikacji')} i utwórz "
+        "hasło „Jarvis” — wklej je, <b>nie</b> zwykłe hasło.<br>"
+        "Nazwa jest opcjonalna: domyślnie to część adresu przed „@”; własne nazwy "
+        "(„praca”, „prywatne”) wpisz po przecinku.",
+        _POLA_GMAIL,
         sprawdz_gmail,
-        popraw={"GMAIL_APP_PASSWORD": lambda s: s.replace(" ", "")}),
+        popraw={zmienne[2]: (lambda s: s.replace(" ", "")) for zmienne in
+                (konfiguracja.zmienne_konta(n) for n in range(1, konfiguracja.MAKS_KONT_GMAIL + 1))},
+        kolumny=3,
+        wiersze=tuple(f"KONTO {n}" for n in range(1, konfiguracja.MAKS_KONT_GMAIL + 1)),
+        # Stary zapis z jednym kontem (GMAIL_ADDRESS w .env) — po zapisaniu tej
+        # strony konto 1 siedzi już w GMAIL_1_*, a pusty stary zapis w Ustawieniach
+        # wyłącza ten z .env (opis w konfiguracja.py). Sam .env zostaje nietknięty.
+        dodatkowe={zmienna: "" for zmienna in konfiguracja.STARE_KONTO_GMAIL}),
     Strona(
         "kalendarz", "Kalendarz Google",
         "„Co mam jutro?”, „co mam w piątek?” — i dzisiejsze wydarzenia w porannym "
@@ -384,6 +448,20 @@ QLineEdit {{
     font-family: Consolas; font-size: 13px; selection-background-color: {NIEBIESKI};
 }}
 QLineEdit:focus {{ border: 1px solid {CYJAN}; }}
+QComboBox {{
+    background: rgba(10, 40, 56, 0.9); color: {BIALY};
+    border: 1px solid #1f6f94; border-radius: 3px; padding: 8px 10px;
+    font-family: Bahnschrift; font-size: 13px;
+}}
+QComboBox:focus {{ border: 1px solid {CYJAN}; }}
+QCheckBox {{ color: {BIALY}; font-family: Bahnschrift; font-size: 13px; spacing: 10px; }}
+QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid #1f6f94;
+                        border-radius: 2px; background: rgba(10, 40, 56, 0.9); }}
+QCheckBox::indicator:checked {{ background: {CYJAN}; border-color: {CYJAN}; }}
+QComboBox QAbstractItemView {{
+    background: #06141d; color: {BIALY}; selection-background-color: #1f6f94;
+    border: 1px solid #1f6f94;
+}}
 QPushButton {{
     background: transparent; color: {CYJAN}; border: 1px solid {NIEBIESKI};
     border-radius: 3px; padding: 8px 18px; font-family: Bahnschrift; font-size: 13px;
@@ -653,6 +731,13 @@ class KreatorJarvisa(QDialog):
         # podsumowaniem, a samo pobieranie rusza od razu, w tle.
         if modele.potrzebne_pobranie():
             self._dodaj_strone_modeli()
+        # Monitor tapety — tylko w Ustawieniach; pierwsze uruchomienie
+        # dotyczy kluczy, a tapeta i tak startuje na głównym monitorze.
+        self._wybor_monitora = None
+        self._panel_wlaczony = None
+        if not pierwsze:
+            self._dodaj_strone_tapety()
+            self._dodaj_strone_panelu()
         self._dodaj_podsumowanie()
 
         self._stos.setCurrentIndex(0)
@@ -714,11 +799,40 @@ class KreatorJarvisa(QDialog):
         formularz = QFormLayout()
         formularz.setSpacing(10)
         formularz.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        # Siatka (np. konta Gmail): pierwsze kolumny*len(wiersze) pól idzie tutaj,
+        # wiersz po wierszu, a nad nią nagłówki kolumn z etykiet pierwszego wiersza.
+        w_siatce = strona.kolumny * len(strona.wiersze)
+        siatka = None
+        if w_siatce:
+            siatka = QGridLayout()
+            siatka.setHorizontalSpacing(8)
+            siatka.setVerticalSpacing(8)
+            for kolumna, pole in enumerate(strona.pola[:strona.kolumny]):
+                naglowek = QLabel(pole.etykieta.upper())
+                naglowek.setObjectName("etykieta")
+                naglowek.setFont(_czcionka_rozstrzelona(8, 1.5))
+                siatka.addWidget(naglowek, 0, kolumna + 1)
+            for numer, podpis in enumerate(strona.wiersze):
+                etykieta = QLabel(podpis)
+                etykieta.setObjectName("etykieta")
+                etykieta.setFont(_czcionka_rozstrzelona(8, 1.5))
+                siatka.addWidget(etykieta, numer + 1, 0)
+            siatka.setColumnStretch(1, 2)
+            siatka.setColumnStretch(2, 3)
+            siatka.setColumnStretch(3, 3)
         pola = {}
-        for pole in strona.pola:
-            wpis = QLineEdit(konfiguracja.wartosc(pole.zmienna)
-                             or konfiguracja.DOMYSLNE.get(pole.zmienna, ""))
-            wpis.setPlaceholderText(pole.podpowiedz)
+        for indeks, pole in enumerate(strona.pola):
+            obecna = (konfiguracja.wartosc(pole.zmienna)
+                      or (konfiguracja.wartosc(pole.zapas) if pole.zapas else "")
+                      or konfiguracja.DOMYSLNE.get(pole.zmienna, ""))
+            if pole.wybor:
+                wpis = QComboBox()
+                for opcja in pole.wybor:
+                    wpis.addItem(opcja, opcja)
+                wpis.setCurrentIndex(max(0, wpis.findData(obecna)))
+            else:
+                wpis = QLineEdit(obecna)
+                wpis.setPlaceholderText(pole.podpowiedz)
             wiersz = QHBoxLayout()
             wiersz.addWidget(wpis, 1)
             if pole.tajne:
@@ -735,11 +849,16 @@ class KreatorJarvisa(QDialog):
                 wykryj.setObjectName("boczny")
                 wykryj.clicked.connect(self._wykryj_id)
                 wiersz.addWidget(wykryj)
+            pola[pole.zmienna] = wpis
+            if indeks < w_siatce:
+                siatka.addLayout(wiersz, indeks // strona.kolumny + 1, indeks % strona.kolumny + 1)
+                continue
             etykieta = QLabel(pole.etykieta.upper())
             etykieta.setObjectName("etykieta")
             etykieta.setFont(_czcionka_rozstrzelona(8, 1.5))
             formularz.addRow(etykieta, wiersz)
-            pola[pole.zmienna] = wpis
+        if siatka is not None:
+            uklad.addLayout(siatka)
         uklad.addLayout(formularz)
 
         status = self._etykieta("", "status")
@@ -790,6 +909,151 @@ class KreatorJarvisa(QDialog):
         self._stos.addWidget(widget)
         self._strony.append((None, widget, {}, None))
         self._modele.start()
+
+    def _dodaj_strone_tapety(self):
+        """Wybór monitora dla trybu tapety (opis trybu w gui.py i tapeta.py)."""
+        widget = QWidget()
+        uklad = QVBoxLayout(widget)
+        uklad.setSpacing(12)
+        self._naglowek(uklad, "Tapeta", "OPCJONALNE")
+        uklad.addWidget(self._etykieta(
+            "W trybie tapety Jarvis jest żywą tapetą pulpitu: na całym ekranie wybranego "
+            "monitora, pod wszystkimi oknami i pod ikonami. Pokazuje reaktor, zegar, "
+            "procesor, pamięć, kartę graficzną i ostatnie akcje. Gdy grasz albo oglądasz "
+            "film na pełnym ekranie, animacje stają.", "opis"))
+        uklad.addWidget(self._etykieta(
+            "Włączasz go i wyłączasz w menu ikony Jarvisa przy zegarku: "
+            "<b>Tryb tapety</b>. Tutaj wybierasz tylko monitor.", "instrukcja", True))
+
+        self._wybor_monitora = QComboBox()
+        self._wybor_monitora.addItem("Główny monitor (domyślnie)", "")
+        glowny = QGuiApplication.primaryScreen()
+        for ekran in QGuiApplication.screens():
+            g = ekran.geometry()
+            opis = f"{ekran.name()} — {g.width()}×{g.height()}, {ekran.refreshRate():.0f} Hz"
+            if ekran == glowny:
+                opis += " (teraz główny)"
+            self._wybor_monitora.addItem(opis, ekran.name())
+        obecny = self._wybor_monitora.findData(konfiguracja.monitor_tapety())
+        self._wybor_monitora.setCurrentIndex(max(0, obecny))
+
+        formularz = QFormLayout()
+        etykieta = QLabel("MONITOR")
+        etykieta.setObjectName("etykieta")
+        etykieta.setFont(_czcionka_rozstrzelona(8, 1.5))
+        formularz.addRow(etykieta, self._wybor_monitora)
+        uklad.addLayout(formularz)
+        uklad.addStretch()
+        uklad.addLayout(self._przyciski(wstecz=True, dalej=("Dalej", self._dalej_z_tapety)))
+        self._stos.addWidget(widget)
+        self._strony.append((None, widget, {}, None))
+
+    def _dalej_z_tapety(self):
+        wybrany = self._wybor_monitora.currentData()
+        if wybrany != konfiguracja.monitor_tapety():
+            self._zmiany[konfiguracja.MONITOR_TAPETY] = wybrany
+        else:
+            self._zmiany.pop(konfiguracja.MONITOR_TAPETY, None)
+        self._dalej()
+
+    # Opisy elementów panelu na stronie Ustawień (kolejność: konfiguracja.ELEMENTY_PANELU).
+    OPISY_ELEMENTOW = {
+        "rozmowa": "Rozmowa na żywo — co mówisz Ty i co odpowiada Jarvis",
+        "dzien": "Dzień — kalendarz, przypomnienia i pogoda",
+        "maile": "Ważne maile — nadawcy i tematy nieprzeczytanych (widać je na ekranie)",
+        "spotify": "Spotify — okładka, tytuł i postęp utworu",
+        "notatki": "Notatki z dziś",
+    }
+
+    def _dodaj_strone_panelu(self):
+        """Panel boczny: gdzie (tryb 2 ekranów) i co w nim widać (opis w panel.py)."""
+        widget = QWidget()
+        uklad = QVBoxLayout(widget)
+        uklad.setSpacing(10)
+        self._naglowek(uklad, "Panel boczny", "OPCJONALNE")
+        uklad.addWidget(self._etykieta(
+            "Wąski panel z rozmową na żywo, planem dnia, mailami, muzyką i notatkami.", "opis"))
+
+        self._panel_wlaczony = QCheckBox("Pokazuj panel boczny")
+        self._panel_wlaczony.setChecked(konfiguracja.panel_wlaczony())
+        uklad.addWidget(self._panel_wlaczony)
+
+        # Tryb 2 ekranów ma sens dopiero przy dwóch monitorach — przy jednym
+        # nawet go nie pokazujemy (panel wysuwa się wtedy z tapety).
+        self._panel_2_ekrany = self._panel_monitor = self._panel_krawedz = None
+        ekrany = QGuiApplication.screens()
+        if len(ekrany) >= 2:
+            self._panel_2_ekrany = QCheckBox("Tryb 2 ekranów — pasek przy krawędzi drugiego monitora")
+            self._panel_2_ekrany.setChecked(konfiguracja.panel_2_ekrany())
+            uklad.addWidget(self._panel_2_ekrany)
+            self._panel_monitor = QComboBox()
+            self._panel_monitor.addItem("Drugi monitor (nie główny)", "")
+            for ekran in ekrany:
+                g = ekran.geometry()
+                self._panel_monitor.addItem(f"{ekran.name()} — {g.width()}×{g.height()}", ekran.name())
+            self._panel_monitor.setCurrentIndex(max(0, self._panel_monitor.findData(konfiguracja.panel_monitor())))
+            self._panel_krawedz = QComboBox()
+            self._panel_krawedz.addItem("Prawa krawędź", "prawa")
+            self._panel_krawedz.addItem("Lewa krawędź", "lewa")
+            self._panel_krawedz.setCurrentIndex(self._panel_krawedz.findData(konfiguracja.panel_krawedz()))
+            wiersz = QHBoxLayout()
+            wiersz.addWidget(self._panel_monitor, 2)
+            wiersz.addWidget(self._panel_krawedz, 1)
+            uklad.addLayout(wiersz)
+            uklad.addWidget(self._etykieta(
+                "Odłączysz drugi monitor — panel sam przejdzie na tapetę, a po podłączeniu wróci.",
+                "instrukcja"))
+        else:
+            uklad.addWidget(self._etykieta(
+                "Masz teraz jeden monitor, więc panel wysuwa się z prawej krawędzi tapety: "
+                "sam w trakcie rozmowy albo z menu przy zegarku (<b>Wysuń panel boczny</b>). "
+                "Tryb 2 ekranów pojawi się tutaj po podłączeniu drugiego monitora.",
+                "instrukcja", True))
+
+        self._panel_elementy = {}
+        wlaczone = konfiguracja.panel_elementy()
+        for element in konfiguracja.ELEMENTY_PANELU:
+            pole = QCheckBox(self.OPISY_ELEMENTOW[element])
+            pole.setChecked(element in wlaczone)
+            uklad.addWidget(pole)
+            self._panel_elementy[element] = pole
+
+        formularz = QFormLayout()
+        etykieta = QLabel("MIASTO (POGODA)")
+        etykieta.setObjectName("etykieta")
+        etykieta.setFont(_czcionka_rozstrzelona(8, 1.5))
+        self._panel_miasto = QLineEdit(konfiguracja.pogoda_miasto())
+        self._panel_miasto.setPlaceholderText("np. Kraków — pogodę podaje darmowy serwis Open-Meteo")
+        formularz.addRow(etykieta, self._panel_miasto)
+        uklad.addLayout(formularz)
+
+        uklad.addStretch()
+        uklad.addLayout(self._przyciski(wstecz=True, dalej=("Dalej", self._dalej_z_panelu)))
+        self._stos.addWidget(widget)
+        self._strony.append((None, widget, {}, None))
+
+    def _dalej_z_panelu(self):
+        """Do zmian trafia tylko to, co naprawdę się zmieniło."""
+        elementy = [e for e, pole in self._panel_elementy.items() if pole.isChecked()]
+        nowe = {
+            konfiguracja.PANEL: ("1" if self._panel_wlaczony.isChecked() else "0",
+                                 "1" if konfiguracja.panel_wlaczony() else "0"),
+            # "brak" zamiast pustej wartości — pusta znaczy "domyślne" (konfiguracja.py).
+            konfiguracja.PANEL_ELEMENTY: (",".join(elementy) or "brak",
+                                          ",".join(konfiguracja.panel_elementy()) or "brak"),
+            konfiguracja.POGODA_MIASTO: (self._panel_miasto.text().strip(), konfiguracja.pogoda_miasto()),
+        }
+        if self._panel_2_ekrany is not None:
+            nowe[konfiguracja.PANEL_2_EKRANY] = ("1" if self._panel_2_ekrany.isChecked() else "0",
+                                                 "1" if konfiguracja.panel_2_ekrany() else "0")
+            nowe[konfiguracja.PANEL_MONITOR] = (self._panel_monitor.currentData(), konfiguracja.panel_monitor())
+            nowe[konfiguracja.PANEL_KRAWEDZ] = (self._panel_krawedz.currentData(), konfiguracja.panel_krawedz())
+        for zmienna, (nowa, obecna) in nowe.items():
+            if nowa != obecna:
+                self._zmiany[zmienna] = nowa
+            else:
+                self._zmiany.pop(zmienna, None)
+        self._dalej()
 
     def _dodaj_podsumowanie(self):
         widget = QWidget()
@@ -850,7 +1114,7 @@ class KreatorJarvisa(QDialog):
         strona = self._biezaca()[0]
         self._wyniki[strona.funkcja] = "pominieta"
         for zmienna in list(self._zmiany):
-            if zmienna in {p.zmienna for p in strona.pola}:
+            if zmienna in {p.zmienna for p in strona.pola} | set(strona.dodatkowe):
                 del self._zmiany[zmienna]
         self._dalej()
 
@@ -858,6 +1122,7 @@ class KreatorJarvisa(QDialog):
         strona = self._biezaca()[0]
         for pole in strona.pola:
             self._zmiany[pole.zmienna] = ""
+        self._zmiany.update(strona.dodatkowe)
         self._wyniki[strona.funkcja] = "wylaczona"
         self._dalej()
 
@@ -876,9 +1141,9 @@ class KreatorJarvisa(QDialog):
         strona, widget, pola, status = self._biezaca()
         wartosci = {}
         for zmienna, wpis in pola.items():
-            tekst = wpis.text().strip()
+            tekst = (wpis.currentData() if isinstance(wpis, QComboBox) else wpis.text()).strip()
             wartosci[zmienna] = strona.popraw.get(zmienna, lambda s: s)(tekst)
-        puste = [p.etykieta for p in strona.pola if not wartosci[p.zmienna]]
+        puste = [p.etykieta for p in strona.pola if p.wymagane and not wartosci[p.zmienna]]
         if puste:
             self._status(status, f"Uzupełnij: {', '.join(puste)}.", CZERWONY)
             return
@@ -907,6 +1172,7 @@ class KreatorJarvisa(QDialog):
             return
         self._status(status, "✓ " + komunikat, CYJAN)
         self._zmiany.update(wartosci)
+        self._zmiany.update(strona.dodatkowe)
         self._wyniki[strona.funkcja] = "ok"
         # Chwila, żeby zdążyć przeczytać "działa", potem dalej.
         QTimer.singleShot(1200, lambda: self._stos.currentIndex() == indeks and self._dalej())
@@ -961,6 +1227,23 @@ class KreatorJarvisa(QDialog):
             opis, kolor = (("pobrane", CYJAN) if self._modele.skonczone
                            else ("jeszcze się pobierają — wróć o krok", BURSZTYN))
             wiersze.append(f'<span style="color:{kolor};">■</span>&nbsp; <b>Modele mowy</b> — {opis}')
+        if self._wybor_monitora is not None:
+            opis = self._wybor_monitora.currentText().split(" — ")[0]
+            zmiana = konfiguracja.MONITOR_TAPETY in self._zmiany
+            wiersze.append(f'<span style="color:{CYJAN if zmiana else NIEBIESKI};">■</span>&nbsp; '
+                           f'<b>Tapeta</b> — {opis}{"" if zmiana else " (bez zmian)"}')
+        if self._panel_wlaczony is not None:
+            if not self._panel_wlaczony.isChecked():
+                opis = "wyłączony"
+            elif self._panel_2_ekrany is not None and self._panel_2_ekrany.isChecked():
+                opis = (f"pasek: {self._panel_monitor.currentText().split(' — ')[0]}, "
+                        f"{self._panel_krawedz.currentText().lower()}")
+            else:
+                opis = "wysuwany z tapety"
+            zmiana = any(z.startswith("JARVIS_PANEL") or z == konfiguracja.POGODA_MIASTO
+                         for z in self._zmiany)
+            wiersze.append(f'<span style="color:{CYJAN if zmiana else NIEBIESKI};">■</span>&nbsp; '
+                           f'<b>Panel boczny</b> — {opis}{"" if zmiana else " (bez zmian)"}')
         self._podsumowanie.setText("<br>".join(wiersze))
 
     def _ma_anthropic(self):
@@ -1043,10 +1326,14 @@ def uruchom_kreator(pierwsze=False, rodzic=None):
     Pokazuje kreator (pierwsze=True) albo okno Ustawień i czeka na zamknięcie.
     Wymaga istniejącego QApplication (main.py go ma).
 
-    Zwraca: True, jeśli zapisano ustawienia.
+    Zwraca: słownik zapisanych zmian {"ZMIENNA": wartość} — pusty, gdy
+    zamknięto okno bez zapisu albo niczego nie zmieniono. main.py patrzy
+    po nazwach, czy potrzebny jest restart (konfiguracja.BEZ_RESTARTU).
     """
     okno = KreatorJarvisa(pierwsze=pierwsze, rodzic=rodzic)
-    return okno.exec() == QDialog.Accepted
+    if okno.exec() != QDialog.Accepted:
+        return {}
+    return dict(okno._zmiany)
 
 
 def zapytaj_o_restart(rodzic=None):

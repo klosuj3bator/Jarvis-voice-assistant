@@ -211,16 +211,16 @@ def _moja_odpowiedz(wydarzenie):
     """
     Twoja odpowiedź na zaproszenie: ACCEPTED, DECLINED, NEEDS-ACTION albo None.
 
-    Rozpoznajemy Cię po adresie GMAIL_ADDRESS z .env — kalendarz Google
-    należy zwykle do tego samego konta. Porównanie dzieje się tylko tutaj,
-    na komputerze; adres nigdzie nie jest wysyłany.
+    Rozpoznajemy Cię po adresach kont Gmail z Ustawień / .env (każde konto
+    się liczy) — kalendarz Google należy zwykle do jednego z nich. Porównanie
+    dzieje się tylko tutaj, na komputerze; adresy nigdzie nie są wysyłane.
     """
-    moj = (os.getenv("GMAIL_ADDRESS") or "").strip().lower()
+    moje = {k["adres"].strip().lower() for k in konfiguracja.konta_gmail()}
     goscie = wydarzenie.get("ATTENDEE")
-    if not moj or not goscie:
+    if not moje or not goscie:
         return None
     for gosc in goscie if isinstance(goscie, list) else [goscie]:
-        if str(gosc).lower().removeprefix("mailto:") == moj:
+        if str(gosc).lower().removeprefix("mailto:") in moje:
             return str(gosc.params.get("PARTSTAT", "")).upper() or None
     return None
 
@@ -273,6 +273,25 @@ def wydarzenia_dnia(dzien):
     wynik.sort(key=lambda w: (not w["caly_dzien"],
                               w["od"] if not w["caly_dzien"] else poczatek))
     return wynik
+
+
+def najblizsze(teraz=None, godzin=24):
+    """
+    Najbliższe wydarzenie z godziną, które jeszcze się nie zaczęło —
+    w ciągu `godzin` od teraz (powitanie.py). Całodniowe pomijamy: "co mam
+    najbliżej" to pytanie o godzinę.
+
+    Zwraca: {"kiedy": "dziś 18:30" / "jutro 9:00", "tytul": ...} albo None.
+    """
+    teraz = teraz or datetime.datetime.now(STREFA)
+    granica = teraz + datetime.timedelta(hours=godzin)
+    for dzien in (teraz.date(), teraz.date() + datetime.timedelta(days=1)):
+        for w in wydarzenia_dnia(dzien):
+            if w["caly_dzien"] or not (teraz < w["od"] <= granica):
+                continue
+            dzien_opis = "dziś" if w["od"].date() == teraz.date() else "jutro"
+            return {"kiedy": f"{dzien_opis} {w['od'].hour}:{w['od'].minute:02d}", "tytul": w["tytul"]}
+    return None
 
 
 def _linia(w, dzien, teraz):

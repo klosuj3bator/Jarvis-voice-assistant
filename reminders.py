@@ -42,6 +42,7 @@ import re
 import threading
 import uuid
 
+import akcje
 import sciezki
 import zajetosc
 
@@ -369,6 +370,8 @@ def _wypowiedz(wpis, teraz):
             _ustaw_stan("speaking")
 
         logger.info("[PRZYPOMNIENIE] mówię: %s", tekst)
+        # Na HUD bez treści — tapetę widzi każdy, kto przejdzie obok (akcje.py).
+        akcje.zapisz("Przypomnienie")
         _mow(tekst)
 
         if _ustaw_stan:

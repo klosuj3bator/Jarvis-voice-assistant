@@ -60,6 +60,21 @@ Teraz praca jest podzielona tak:
 
 Qt odmierza klatki w rytmie odświeżania monitora — na 240 Hz to 240 równych
 klatek na sekundę (co 4,17 ms), przy ok. 1% procesora.
+
+
+TRYB TAPETY
+===========
+
+Ten sam HUD może być żywą tapetą pulpitu: pełny ekran wybranego monitora,
+pod wszystkimi oknami i pod ikonami, bez paska zadań, Alt+Tab i focusu
+(jak to działa po stronie Windowsa — tapeta.py). Włącza się go z menu ikony
+przy zegarku, monitor wybiera się w Ustawieniach. Na tapecie zostaje to,
+co ma sens bez klawiatury: reaktor, zegar z datą, CPU/RAM/GPU i ostatnie
+akcje Jarvisa (akcje.py) — bez podpowiedzi klawiszy i bez odczytu sieci.
+
+Gdy gra albo film zajmuje cały ekran, animacje stają (JarvisHUD._petla_czuwania):
+pierścienie zamierają w miejscu, a scena odświeża się raz na sekundę
+zamiast 240 razy — żeby HUD nie zabierał karcie graficznej mocy.
 """
 
 import logging
@@ -82,18 +97,23 @@ import sys
 os.environ.setdefault("QSG_RENDER_LOOP", "basic")
 
 import threading  # noqa: E402
+import time  # noqa: E402
 
 import psutil  # noqa: E402
-from PySide6.QtCore import QLineF, QObject, QPointF, QRectF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (
-    QAction, QColor, QFont, QFontDatabase, QIcon, QImage, QPainter,
-    QPainterPath, QPen, QPixmap, QRadialGradient,
+from PySide6.QtCore import (QLineF, QObject, QPointF, QRect, QRectF, QSize, Qt, QTimer, QUrl,  # noqa: E402
+                            Signal)
+from PySide6.QtGui import (  # noqa: E402
+    QAction, QColor, QFont, QFontDatabase, QGuiApplication, QIcon, QImage, QPainter,
+    QPainterPath, QPen, QPixmap, QRadialGradient, QWindow,
 )
-from PySide6.QtQml import QQmlImageProviderBase
-from PySide6.QtQuick import QQuickImageProvider, QQuickView
-from PySide6.QtWidgets import QMenu, QSystemTrayIcon
+from PySide6.QtQml import QQmlImageProviderBase  # noqa: E402
+from PySide6.QtQuick import QQuickImageProvider, QQuickView  # noqa: E402
+from PySide6.QtWidgets import QMenu, QSystemTrayIcon  # noqa: E402
 
+import akcje  # noqa: E402
+import panel  # noqa: E402
 import sciezki  # noqa: E402
+import tapeta  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +130,11 @@ SCIEZKA_IKONY = sciezki.zasob("jarvis_icon.png")
 SCIEZKA_QML = sciezki.zasob("hud.qml")
 
 CZAS_BLYSKU_BLEDU_MS = 900   # jak długo trwa czerwony błysk, zanim wrócimy do idle
+
+# Ile klatek na sekundę rysuje tapeta (w zwykłym oknie — tyle, ile monitor).
+# Na pulpicie Windows nie trzyma tempa odświeżania i HUD rysował 248-377
+# klatek na sekundę — opis przy TYKACZ w hud.qml. 60 w zupełności wystarcza.
+KLATKI_TAPETY = 60
 
 # --- Paleta ---
 
@@ -139,6 +164,23 @@ SIATKA = (60, 150, 190)
 # Wzór zapalonych segmentów wieńca (które z 72 świecą pełnym światłem)
 # siedzi w hud.frag, bo to shader decyduje o każdym pikselu segmentu.
 STANY = {
+    # Start Jarvisa (rozruch.py): wieniec kręci się szybko, a smuga obiega go
+    # jak wskaźnik ładowania. Pod napisem — pasek postępu (hud.qml).
+    "uruchamianie": {
+        "kolor": (86, 214, 255),
+        "akcent": BURSZTYN,
+        "etykieta": "URUCHAMIANIE SYSTEMÓW…",
+        "tempo": 2.0,
+        "min": 0.62,
+        "max": 0.90,
+        "hud": 12.0,
+        "seg": 30.0,
+        "wewn": -38.0,
+        "bieg": 0.0,
+        "smuga": True,
+        "fale_co": 0.0,
+        "migot": 0.0,
+    },
     "idle": {
         "kolor": (58, 168, 222),
         "akcent": BURSZTYN,
@@ -465,6 +507,7 @@ class DostawcaObrazow(QQuickImageProvider):
         super().__init__(QQmlImageProviderBase.ImageType.Image)
         self._rodzina = rodzina
         self._rodzina_mono = rodzina_mono
+        self.zaslona = None      # QImage — zasłona przed zejściem z tapety
 
     def requestImage(self, id_obrazu, rozmiar, zadany_rozmiar):
         rodzaj, _, parametr = id_obrazu.partition("/")
@@ -474,6 +517,14 @@ class DostawcaObrazow(QQuickImageProvider):
                 return narysuj_tlo(w, h, self._rodzina_mono)
             if rodzaj == "napis":
                 return narysuj_napis(int(parametr), self._rodzina)
+            if rodzaj == "okladka":
+                # Okładkę Spotify pobrał już panel.py — scena sama do sieci
+                # nie sięga (opis w Panel.qml).
+                bajty = panel.okladka(parametr)
+                return QImage.fromData(bajty) if bajty else QImage()
+            if rodzaj == "zaslona":
+                # Zwykła tapeta spod HUD-a (JarvisHUD._zakryj_tapeta).
+                return self.zaslona if self.zaslona is not None else QImage()
         except Exception:
             # Wyjątek wewnątrz Qt zniknąłby bez śladu — logujemy go sami.
             logger.exception("Nie udało się narysować obrazu %r", id_obrazu)
@@ -500,7 +551,30 @@ class _Most(QObject):
     """
 
     stan = Signal(str)        # nazwa nowego stanu
-    odczyty = Signal(list)    # wiersze do rogu ekranu (procesor, pamięć, sieć, temperatura)
+    odczyty = Signal(list)    # wiersze do rogu ekranu (procesor, pamięć, karta, sieć)
+    akcje = Signal(list)      # ostatnie akcje Jarvisa (akcje.py)
+    postep = Signal(int, str)  # start: procent i to, co się ładuje (rozruch.py)
+    tapeta = Signal(bool)     # tryb tapety — inny układ napisów
+    wstrzymaj = Signal(bool)  # gra na pełnym ekranie — animacje stają
+
+    # Ten jeden odbiera Python, nie QML: warstwa tapety zniknęła (np. restart
+    # Explorera) i trzeba wstawić HUD od nowa. Zdarza się rzadko, więc
+    # czekanie na GIL (opis wyżej) nie ma tu znaczenia.
+    utrata_tapety = Signal()
+
+
+class MostPanelu(QObject):
+    """
+    Sygnały panelu bocznego (panel.py -> Panel.qml). Jeden obiekt karmi oba
+    wcielenia panelu naraz: wysuwany z HUD-a i pasek na drugim monitorze
+    (pasek_boczny.py). Odbiorcami są sceny QML — jak w _Most, bez Pythona
+    w wątku GUI.
+    """
+
+    dane = Signal(dict)          # wszystkie dane panelu (panel.stan())
+    elementy = Signal(list)      # włączone elementy, np. ["rozmowa", "dzien"]
+    wHud = Signal(bool)          # True = panel wysuwa się z HUD-a (jeden monitor)
+    przypiety = Signal(bool)     # True = "Wysuń panel" z menu przy zegarku
 
 
 class JarvisHUD(QQuickView):
@@ -513,10 +587,21 @@ class JarvisHUD(QQuickView):
     Klawisze:
         ESC — schowaj okno (Jarvis dalej działa w zasobniku)
         F11 albo podwójne kliknięcie — przełącz pełny ekran / okno
+
+    Tryb tapety (opis na górze pliku) — z wątku GUI:
+        hud.ustaw_tapete(True, "G25F2A")   # nazwa monitora z Qt, "" = główny
     """
 
     def __init__(self):
         super().__init__()
+
+        # --- tryb tapety (opis na górze pliku i w tapeta.py) ---
+        self._tapeta = False        # czy HUD ma być tapetą (także gdy chwilowo schowany)
+        self._ekran_tapety = ""     # nazwa monitora, "" = główny
+        self._warstwa = None        # uchwyt warstwy tapety albo None (plan awaryjny)
+        self._obcy_rodzic = None    # ta warstwa jako okno Qt — trzymamy referencję
+        self._wstawiona = False     # HUD siedzi teraz w warstwie (dla strażnika w tle)
+        self._hwnd = 0              # uchwyt naszego okna — do wykrywania pełnego ekranu
 
         # Zwykłe okno aplikacji, NIE "zawsze na wierzchu". Na pełnym ekranie
         # okno zawsze-na-wierzchu zablokowałoby cały komputer — nie dałoby się
@@ -539,6 +624,9 @@ class JarvisHUD(QQuickView):
         self._dostawca = DostawcaObrazow(rodzina, rodzina_mono)
         self.engine().addImageProvider("jarvis", self._dostawca)
         self._most = _Most()
+        # Panel boczny — ten sam most dostaje pasek na drugim monitorze.
+        self.most_panelu = MostPanelu()
+        self.rodziny = (rodzina, rodzina_mono)
 
         # Wartości startowe ustawiamy PRZED wczytaniem sceny, żeby pierwsza
         # klatka od razu była poprawna, a nie mrugnęła domyślnymi.
@@ -549,6 +637,9 @@ class JarvisHUD(QQuickView):
             "stany": {nazwa: _dla_qml(nazwa) for nazwa in STANY},
             "czasBlyskuBleduMs": CZAS_BLYSKU_BLEDU_MS,
             "most": self._most,
+            "akcje": akcje.ostatnie(),
+            "klatkiTapety": KLATKI_TAPETY,
+            "mostPanelu": self.most_panelu,
         })
         self.setSource(QUrl.fromLocalFile(SCIEZKA_QML))
 
@@ -556,12 +647,28 @@ class JarvisHUD(QQuickView):
             bledy = "; ".join(blad.toString() for blad in self.errors())
             raise RuntimeError(f"Nie udało się wczytać {SCIEZKA_QML}: {bledy}")
 
+        # Nowe akcje przychodzą z wątku agenta — sygnał dowiezie je scenie.
+        akcje.sluchaj(self._most.akcje.emit)
+
+        # Tapeta idzie za monitorem: po odłączeniu, podłączeniu albo zmianie
+        # rozdzielczości wstawiamy ją od nowa. Zdarzenia rzadkie — Python
+        # w wątku GUI jest tu w porządku.
+        self._most.utrata_tapety.connect(self._odswiez_tapete)
+        aplikacja = QGuiApplication.instance()
+        aplikacja.screenAdded.connect(self._nowy_ekran)
+        aplikacja.screenRemoved.connect(lambda _: self._odswiez_tapete())
+        aplikacja.primaryScreenChanged.connect(lambda _: self._odswiez_tapete())
+        for ekran in aplikacja.screens():
+            self._nowy_ekran(ekran, odswiez=False)
+
         # Odczyt procesora i pamięci do narożnika ekranu — w osobnym wątku,
         # z tego samego powodu co w opisie klasy _Most: w wątku GUI nie może
         # regularnie wykonywać się Python. Raz na sekundę wystarczy.
         watek = threading.Thread(target=self._petla_statystyk, name="hud-statystyki",
                                  daemon=True)
         watek.start()
+        # Pauza przy pełnym ekranie i pilnowanie warstwy tapety — też w tle.
+        threading.Thread(target=self._petla_czuwania, name="hud-czuwanie", daemon=True).start()
 
     # ---------------------------------------------------------------
     # Publiczne API — to woła reszta programu
@@ -571,8 +678,8 @@ class JarvisHUD(QQuickView):
         """
         Zmienia stan animacji. BEZPIECZNE do wywołania z dowolnego wątku.
 
-        nazwa_stanu — "idle", "listening", "processing", "speaking", "error",
-                      "no_mic" albo "offline"
+        nazwa_stanu — "uruchamianie", "idle", "listening", "processing", "speaking",
+                      "error", "no_mic" albo "offline"
 
         Ta metoda niczego nie zmienia sama. Emituje sygnał, a Qt dostarczy go
         scenie w wątku GUI. Resztę — płynne przejście kolorów, nowe tempo
@@ -593,20 +700,218 @@ class JarvisHUD(QQuickView):
         """Ostatni stan zgłoszony przez set_state(). Bezpieczne z dowolnego wątku."""
         return self._ostatni_stan
 
+    def pokaz_postep(self, procent, opis):
+        """
+        Postęp startu (rozruch.py) — pasek pod napisem w stanie "uruchamianie".
+        Bezpieczne z dowolnego wątku, tak jak set_state().
+        """
+        self._most.postep.emit(int(procent), opis or "")
+
     def pokaz(self):
         """
         Pokazuje okno w trybie, w którym było ostatnio (pełny ekran albo okno).
 
         Samo show() zawsze otworzyłoby zwykłe okno — nawet jeśli schowałeś
         Jarvisa z pełnego ekranu. Stąd osobna metoda, która pamięta tryb.
+        W trybie tapety wraca na pulpit, bez wychodzenia na wierzch.
         Wołać tylko z wątku GUI (robi to zasobnik systemowy).
         """
+        if self._tapeta:
+            if not self.isVisible():
+                self._wstaw_w_tapete()
+            return
         if self._pelny_ekran:
             self.showFullScreen()
         else:
             self.showNormal()
+        self._hwnd = int(self.winId())
         self.raise_()
         self.requestActivate()
+
+    def schowaj(self):
+        """
+        Chowa HUD (ESC, krzyżyk, menu zasobnika). Z tapety zdejmuje go razem
+        z warstwą — inaczej na pulpicie zostałaby jego ostatnia klatka
+        (opis w tapeta.py, SPRZĄTANIE). Tryb tapety zostaje zapamiętany:
+        pokaz() wróci na pulpit.
+        """
+        if self._tapeta:
+            self._zdejmij_z_tapety()
+        else:
+            self.hide()
+
+    # ---------------------------------------------------------------
+    # Tryb tapety
+    # ---------------------------------------------------------------
+
+    def ustaw_tapete(self, wlaczona, ekran=None):
+        """
+        Włącza albo wyłącza tryb tapety. Tylko z wątku GUI.
+
+        ekran — nazwa monitora (QScreen.name()); "" = główny, None = bez zmian.
+        Wywołane ponownie przy włączonej tapecie przenosi ją na nowy monitor.
+        """
+        if ekran is not None:
+            self._ekran_tapety = ekran
+        if wlaczona:
+            self._tapeta = True
+            self._wstaw_w_tapete()
+        elif self._tapeta:
+            self._zdejmij_z_tapety()
+            self._tapeta = False
+            tapeta.oznacz(False)
+            self.setFlags(Qt.Window)          # znowu zwykłe okno z ramką
+            self._most.tapeta.emit(False)
+            logger.info("[TAPETA] Wyłączona — HUD wraca do zwykłego okna.")
+            self.pokaz()
+
+    def jest_tapeta(self):
+        return self._tapeta
+
+    def _ekran(self):
+        """Monitor dla tapety: wybrany w Ustawieniach, a gdy go nie ma — główny."""
+        for ekran in QGuiApplication.screens():
+            if self._ekran_tapety and ekran.name() == self._ekran_tapety:
+                return ekran
+        if self._ekran_tapety:
+            logger.info("[TAPETA] Nie widzę monitora %r — używam głównego.", self._ekran_tapety)
+        return QGuiApplication.primaryScreen()
+
+    def _wstaw_w_tapete(self):
+        """Wstawia HUD w warstwę tapety wybranego monitora (albo plan awaryjny)."""
+        if self._wstawiona or self.isVisible():
+            self._zdejmij_z_tapety()      # przenosiny na inny monitor / odświeżenie
+
+        ekran = self._ekran()
+        g = ekran.geometry()
+        dpr = ekran.devicePixelRatio()
+        warstwa = tapeta.znajdz_warstwe()
+
+        # Bez focusu i przezroczysty dla myszy: kliknięcie pulpitu nigdy nie
+        # trafi do Jarvisa, tylko do ikon albo pod spód.
+        flagi = Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus | Qt.WindowTransparentForInput
+        if warstwa:
+            tapeta.pokaz_warstwe(warstwa)
+            self.setFlags(flagi)
+            self._obcy_rodzic = QWindow.fromWinId(int(warstwa))
+            self.setParent(self._obcy_rodzic)
+            # Warstwa obejmuje cały wirtualny pulpit (u Ciebie od lewego
+            # monitora, x = -1920), a położenie dziecka liczy się od jej rogu.
+            lewo, gora, _, _ = tapeta.prostokat(warstwa)
+            self.setGeometry(QRect(g.x() - lewo, g.y() - gora, g.width(), g.height()))
+            self.show()
+            # Qt liczy w pikselach "logicznych"; przy skalowaniu ekranu innym
+            # niż 100% dopinamy dokładne położenie w pikselach Windowsa.
+            self._hwnd = int(self.winId())
+            tapeta.ustaw_pozycje(self._hwnd, g.x() - lewo, g.y() - gora,
+                                 round(g.width() * dpr), round(g.height() * dpr))
+            sposob = "warstwa tapety pod ikonami"
+        else:
+            # PLAN AWARYJNY (tapeta.py): zwykłe okno zawsze na spodzie,
+            # narzędziowe (bez paska zadań i Alt+Tab).
+            self.setParent(None)
+            self.setFlags(flagi | Qt.Tool | Qt.WindowStaysOnBottomHint)
+            self.setGeometry(g)
+            self.show()
+            self._hwnd = int(self.winId())
+            sposob = "okno na spodzie (nie znalazłem warstwy tapety)"
+
+        self._warstwa = warstwa
+        self._wstawiona = True
+        tapeta.oznacz(True)
+        self._most.tapeta.emit(True)
+        logger.info("[TAPETA] Na monitorze %s (%dx%d) — %s.",
+                    ekran.name(), g.width(), g.height(), sposob)
+
+    def _zdejmij_z_tapety(self):
+        """Zdejmuje HUD z pulpitu i sprząta warstwę (opis w tapeta.py)."""
+        self._wstawiona = False
+        # Po restarcie Explorera naszego okna już nie ma (zginęło razem
+        # z warstwą) — wtedy Qt musi zapomnieć stary uchwyt i zrobić nowy.
+        if self._hwnd and not tapeta.istnieje(self._hwnd):
+            self.destroy()
+        elif self._warstwa and self.isVisible():
+            self._zakryj_tapeta()
+        self.hide()
+        self.setParent(None)
+        self._obcy_rodzic = None
+        self.rootObject().setProperty("zaslona", "")     # przy następnym pokazaniu — znów HUD
+        if self._warstwa:
+            tapeta.schowaj_warstwe(self._warstwa)
+        self._warstwa = None
+
+    # Ile najdłużej czekamy, aż scena narysuje zasłonę (zwykle jedna klatka).
+    CZEKANIE_NA_ZASLONE_MS = 600
+
+    def _zakryj_tapeta(self):
+        """
+        Zanim HUD zejdzie z warstwy tapety, zakrywa się obrazem zwykłej tapety
+        spod spodu i czeka, aż ta klatka się narysuje. Warstwa nie przerysowuje
+        się sama, więc ta klatka zostaje na niej po naszym zejściu — i wygląda
+        jak zwykły pulpit (opis w tapeta.py, SPRZĄTANIE). Wątek GUI.
+        """
+        from PySide6.QtCore import QEventLoop
+
+        try:
+            wycinek = tapeta.obraz_tapety(tapeta.prostokat(self._hwnd))
+        except Exception:
+            logger.warning("[TAPETA] Nie udało się pobrać obrazu tapety.", exc_info=True)
+            wycinek = None
+        if wycinek is None:
+            return
+        szer, wys, bajty = wycinek
+        self._dostawca.zaslona = QImage(bajty, szer, wys, szer * 4, QImage.Format_RGB32).copy()
+        self._numer_zaslony = getattr(self, "_numer_zaslony", 0) + 1
+
+        # Dwie klatki: w pierwszej scena dopiero wczytuje obraz, w drugiej na pewno go ma.
+        klatki = [0]
+        petla = QEventLoop()
+
+        def klatka():
+            klatki[0] += 1
+            if klatki[0] >= 2:
+                petla.quit()
+
+        self.frameSwapped.connect(klatka)
+        QTimer.singleShot(self.CZEKANIE_NA_ZASLONE_MS, petla.quit)
+        self.rootObject().setProperty("zaslona", f"image://jarvis/zaslona/{self._numer_zaslony}")
+        self.update()
+        petla.exec()
+        self.frameSwapped.disconnect(klatka)
+        logger.info("[TAPETA] Zasłona z tapety narysowana (%d klatek) — HUD może zejść.", klatki[0])
+
+    def _odswiez_tapete(self):
+        """
+        Wstawia tapetę od nowa — po zmianie monitorów albo utracie warstwy.
+        Tylko gdy tapeta jest na pulpicie: schowanej (ESC, menu) nie pokazujemy.
+        """
+        if self._tapeta and self._wstawiona:
+            logger.info("[TAPETA] Zmiana monitorów albo pulpitu — wstawiam tapetę od nowa.")
+            self._wstaw_w_tapete()
+
+    def _nowy_ekran(self, ekran, odswiez=True):
+        ekran.geometryChanged.connect(lambda _: self._odswiez_tapete())
+        if odswiez:
+            self._odswiez_tapete()
+
+    def zakoncz(self):
+        """
+        Przy zamykaniu programu: zdejmuje tapetę i sprząta pulpit.
+        Można wołać wielokrotnie (main.py i awaryjnie atexit). Zapisany tryb
+        tapety zostaje — przy następnym starcie Jarvis znowu będzie tapetą.
+        """
+        if not self._tapeta:
+            return
+        self._tapeta = False
+        warstwa = self._warstwa
+        try:
+            self._zdejmij_z_tapety()
+        except RuntimeError:
+            # Qt zdążył już usunąć okno — chowamy samą warstwę, pomijając
+            # nasze (już martwe) okno na niej.
+            if warstwa:
+                tapeta.schowaj_warstwe(warstwa, nasze={self._hwnd})
+        tapeta.oznacz(False)
 
     def _petla_statystyk(self):
         """
@@ -627,38 +932,58 @@ class JarvisHUD(QQuickView):
 
         siec = czujniki.PomiarSieci()
         lacze = czujniki.predkosc_lacza() or 100.0
-        szczyt_temperatury = 0.0
+        szczyt_karty = 0.0
 
         while True:
             cpu = psutil.cpu_percent(interval=1.0)
-            ram = psutil.virtual_memory().percent
+            pamiec = psutil.virtual_memory()
             pobieranie, wysylanie = siec.odczyt()
+            # Temperatura procesora jest tylko z LibreHardwareMonitora
+            # (opis w czujniki.py); kartę NVIDIA czytamy zawsze, wprost.
+            temperatura = czujniki.temperatura()
+            karta = czujniki.karta_graficzna()
 
+            temp_cpu = temperatura["teraz"] if temperatura and temperatura["etykieta"] == "CPU" else None
             wiersze = [
-                {"etykieta": "CPU", "wartosc": f"{cpu:.0f} %", "podpis": "",
-                 "wypelnienie": cpu / 100.0, "alarm": cpu > 80},
-                {"etykieta": "RAM", "wartosc": f"{ram:.0f} %", "podpis": "",
-                 "wypelnienie": ram / 100.0, "alarm": ram > 80},
-                {"etykieta": "SIEĆ",
-                 "wartosc": f"↓ {liczba(pobieranie)}   ↑ {liczba(wysylanie)} Mb/s",
-                 "podpis": f"szczyt ↓ {liczba(siec.szczyt_pobierania)} "
-                           f"/ łącze {lacze:.0f} Mb/s",
-                 # Pasek pokazuje, jaką część łącza zajmuje ruch.
-                 "wypelnienie": min(1.0, pobieranie / lacze), "alarm": False},
+                {"etykieta": "CPU", "wartosc": f"{cpu:.0f} %",
+                 "podpis": f"{temp_cpu:.0f} °C" if temp_cpu else "",
+                 "wypelnienie": cpu / 100.0,
+                 "alarm": cpu > 80 or bool(temp_cpu and temp_cpu / czujniki.LIMIT_PROCESORA_C
+                                           > czujniki.PROG_ALARMU_TEMPERATURY)},
+                {"etykieta": "RAM", "wartosc": f"{pamiec.percent:.0f} %",
+                 "podpis": f"{liczba(pamiec.used / 1024 ** 3)} z {pamiec.total / 1024 ** 3:.0f} GB",
+                 "wypelnienie": pamiec.percent / 100.0, "alarm": pamiec.percent > 80},
             ]
 
-            temperatura = czujniki.temperatura()
-            if temperatura:
-                szczyt_temperatury = max(szczyt_temperatury, temperatura["teraz"])
+            if karta:
+                podpis = f"VRAM {liczba(karta['pamiec_uzyta_mb'] / 1024)} z " \
+                         f"{karta['pamiec_calkowita_mb'] / 1024:.0f} GB"
+                goraco = False
+                if karta["temperatura"]:
+                    szczyt_karty = max(szczyt_karty, karta["temperatura"])
+                    podpis = f"{karta['temperatura']:.0f} °C (maks {szczyt_karty:.0f})  ·  " + podpis
+                    goraco = (karta["temperatura"] / (karta["limit"] or 90.0)
+                              > czujniki.PROG_ALARMU_TEMPERATURY)
+                wiersze.append({"etykieta": "GPU", "wartosc": f"{karta['obciazenie']:.0f} %",
+                                "podpis": podpis, "wypelnienie": karta["obciazenie"] / 100.0,
+                                "alarm": goraco or karta["obciazenie"] > 90})
+            elif temperatura and temperatura["etykieta"] == "GPU":
+                # Karta nie od NVIDII, ale temperaturę podał monitor sprzętu.
                 udzial = temperatura["teraz"] / temperatura["limit"]
-                wiersze.append({
-                    "etykieta": temperatura["etykieta"],
-                    "wartosc": f"{temperatura['teraz']:.0f} °C",
-                    "podpis": f"maks {szczyt_temperatury:.0f} "
-                              f"/ limit {temperatura['limit']:.0f} °C",
-                    "wypelnienie": min(1.0, udzial),
-                    "alarm": udzial > czujniki.PROG_ALARMU_TEMPERATURY,
-                })
+                wiersze.append({"etykieta": "GPU", "wartosc": f"{temperatura['teraz']:.0f} °C",
+                                "podpis": f"limit {temperatura['limit']:.0f} °C",
+                                "wypelnienie": min(1.0, udzial),
+                                "alarm": udzial > czujniki.PROG_ALARMU_TEMPERATURY})
+
+            wiersze.append({
+                "etykieta": "SIEĆ",
+                "wartosc": f"↓ {liczba(pobieranie)}   ↑ {liczba(wysylanie)} Mb/s",
+                "podpis": f"szczyt ↓ {liczba(siec.szczyt_pobierania)} / łącze {lacze:.0f} Mb/s",
+                # Pasek pokazuje, jaką część łącza zajmuje ruch.
+                "wypelnienie": min(1.0, pobieranie / lacze), "alarm": False,
+                # Na tapecie tylko CPU, RAM i GPU — sieć zostaje w zwykłym oknie.
+                "tylkoOkno": True,
+            })
 
             try:
                 self._most.odczyty.emit(wiersze)
@@ -666,6 +991,52 @@ class JarvisHUD(QQuickView):
                 # Przy zamykaniu programu Qt kasuje obiekty, a ten wątek
                 # mógł akurat skończyć pomiar. Nie ma już komu wysyłać.
                 return
+
+    # Co ile sekund sprawdzamy, czy coś zajmuje cały ekran (i czy tapeta żyje).
+    # Sekunda to dwa-trzy wywołania Windowsa — niezauważalne dla procesora,
+    # a HUD staje najpóźniej sekundę po starcie gry.
+    CO_ILE_CZUWANIE_S = 1.0
+
+    def _petla_czuwania(self):
+        """
+        Wątek w tle, co sekundę:
+
+          1. PAUZA — gdy gra, film albo prezentacja zajmuje cały ekran
+             (tapeta.pelny_ekran), scena dostaje sygnał `wstrzymaj`: pierścienie
+             zamierają, zegar tyka raz na sekundę. Sama zmiana idzie sygnałem
+             do QML, bez Pythona w wątku GUI (opis w klasie _Most).
+          2. STRAŻNIK TAPETY — gdy warstwa tapety zniknie (restart Explorera),
+             prosi wątek GUI o wstawienie HUD-a od nowa.
+        """
+        wstrzymane = False
+        podejrzen = 0       # ile sprawdzeń pod rząd warstwa tapety wyglądała na zgubioną
+        while True:
+            time.sleep(self.CO_ILE_CZUWANIE_S)
+            try:
+                pelny, powod = tapeta.pelny_ekran(pomijane={self._hwnd})
+                if pelny != wstrzymane:
+                    wstrzymane = pelny
+                    logger.info("[HUD] %s", f"Pełny ekran ({powod}) — wstrzymuję animacje."
+                                if pelny else "Koniec pełnego ekranu — wznawiam animacje.")
+                    self._most.wstrzymaj.emit(pelny)
+
+                # Dwa sprawdzenia pod rząd, nie jedno: zaraz po wstawieniu HUD-a
+                # zdarzył się (30.09) chwilowy fałszywy alarm i niepotrzebne
+                # wstawianie od nowa. Prawdziwy restart Explorera trwa dłużej.
+                warstwa = self._warstwa
+                zgubiona = (self._wstawiona and warstwa and self._hwnd
+                            and (not tapeta.istnieje(warstwa) or tapeta.rodzic(self._hwnd) != warstwa))
+                podejrzen = podejrzen + 1 if zgubiona else 0
+                if podejrzen >= 2:
+                    podejrzen = 0
+                    logger.warning("[TAPETA] Warstwa tapety zniknęła (restart Explorera?).")
+                    self._most.utrata_tapety.emit()
+                    time.sleep(3)     # dajmy Explorerowi wstać, zanim spróbujemy znowu
+            except RuntimeError:
+                return                # zamykanie programu — patrz _petla_statystyk
+            except Exception:
+                logger.exception("[HUD] Błąd czuwania")
+                time.sleep(10)
 
     # ---------------------------------------------------------------
     # Klawiatura, mysz, zamykanie
@@ -675,7 +1046,7 @@ class JarvisHUD(QQuickView):
         if event.key() == Qt.Key_Escape:
             # Chowamy, nie zamykamy — Jarvis dalej słucha w tle,
             # a z powrotem przywołasz go z ikony w zasobniku.
-            self.hide()
+            self.schowaj()
             logger.info("HUD schowany klawiszem ESC.")
         elif event.key() == Qt.Key_F11:
             self._przelacz_pelny_ekran()
@@ -699,7 +1070,7 @@ class JarvisHUD(QQuickView):
         asystenta przez przypadek.
         """
         event.ignore()
-        self.hide()
+        self.schowaj()
         logger.info("HUD schowany (krzyżyk okna).")
 
 
@@ -777,7 +1148,8 @@ class TrayJarvisa:
     """
 
     def __init__(self, app, okno, przy_zamknieciu=None, przy_ustawieniach=None,
-                 czy_tryb_sluchawek=None, ustaw_tryb_sluchawek=None):
+                 czy_tryb_sluchawek=None, ustaw_tryb_sluchawek=None, ustaw_tryb_tapety=None,
+                 panel_boczny=None):
         """
         app                  — obiekt QApplication
         okno                 — pełnoekranowy HUD Jarvisa
@@ -788,12 +1160,17 @@ class TrayJarvisa:
         czy_tryb_sluchawek   — funkcja: czy tryb słuchawek jest włączony
         ustaw_tryb_sluchawek — funkcja(True/False) zapisująca przełącznik
                                (obie z konfiguracja.py; bez nich nie ma tej pozycji)
+        ustaw_tryb_tapety    — funkcja(True/False): zapisuje tryb tapety i przełącza
+                               HUD (main.py); bez niej nie ma tej pozycji
+        panel_boczny         — pasek_boczny.SterownikPanelu; daje pozycję
+                               "Wysuń panel", widoczną, gdy panel jest na HUD-zie
         """
         self._app = app
         self._okno = okno
         self._przy_zamknieciu = przy_zamknieciu
         self._czy_tryb_sluchawek = czy_tryb_sluchawek
         self._ustaw_tryb_sluchawek = ustaw_tryb_sluchawek
+        self._ustaw_tryb_tapety = ustaw_tryb_tapety
 
         # Bez tego schowanie HUD-a (ESC) zamknęłoby cały program.
         app.setQuitOnLastWindowClosed(False)
@@ -830,6 +1207,25 @@ class TrayJarvisa:
             self._akcja_sluchawki.toggled.connect(self._przelacz_sluchawki)
             self._menu.addAction(self._akcja_sluchawki)
 
+        # Tryb tapety (opis na górze pliku): HUD na pulpicie, pod oknami.
+        self._akcja_tapeta = None
+        if ustaw_tryb_tapety is not None:
+            self._akcja_tapeta = QAction("Tryb tapety — Jarvis na pulpicie", self._menu)
+            self._akcja_tapeta.setCheckable(True)
+            self._akcja_tapeta.setChecked(okno.jest_tapeta())
+            self._akcja_tapeta.toggled.connect(self._przelacz_tapete)
+            self._menu.addAction(self._akcja_tapeta)
+
+        # Panel boczny wysuwany z HUD-a (jeden monitor) — z pasek_boczny.py.
+        # Przy pasku na drugim monitorze ta pozycja znika (_odswiez_napis).
+        self._panel = panel_boczny
+        self._akcja_panel = None
+        if panel_boczny is not None:
+            self._akcja_panel = QAction("Wysuń panel boczny", self._menu)
+            self._akcja_panel.setCheckable(True)
+            self._akcja_panel.toggled.connect(panel_boczny.przypnij)
+            self._menu.addAction(self._akcja_panel)
+
         self._menu.addSeparator()
 
         akcja_zamknij = QAction("Zamknij Jarvisa", self._menu)
@@ -859,6 +1255,11 @@ class TrayJarvisa:
         self._akcja_widocznosc.setText(
             "Schowaj Jarvisa" if self._okno.isVisible() else "Pokaż Jarvisa"
         )
+        if self._akcja_panel is not None:
+            self._akcja_panel.setVisible(self._panel.w_hud())
+            self._akcja_panel.blockSignals(True)
+            self._akcja_panel.setChecked(self._panel.przypiety())
+            self._akcja_panel.blockSignals(False)
 
     def _przelacz_sluchawki(self, wlaczony):
         """Zapisuje przełącznik trybu słuchawek i mówi w dymku, co to zmienia."""
@@ -872,10 +1273,15 @@ class TrayJarvisa:
             f"Tryb słuchawek {'włączony' if wlaczony else 'wyłączony'}", opis,
             QSystemTrayIcon.Information, 4000)
 
+    def _przelacz_tapete(self, wlaczony):
+        """Tapeta albo zwykłe okno — zapis i przełączenie robi main.py."""
+        self._ustaw_tryb_tapety(wlaczony)
+        self._odswiez_napis()
+
     def _przelacz_widocznosc(self):
         """Pokazuje albo chowa HUD i aktualizuje napis w menu."""
         if self._okno.isVisible():
-            self._okno.hide()
+            self._okno.schowaj()
             logger.info("HUD schowany.")
         else:
             # pokaz(), a nie show() — przywraca pełny ekran, jeśli w nim był.

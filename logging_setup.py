@@ -39,6 +39,7 @@ niczego — robi to raz main.py, wołając skonfiguruj_logowanie() poniżej.
 
 import logging
 import sys
+import threading
 from logging.handlers import RotatingFileHandler
 
 import sciezki
@@ -95,6 +96,19 @@ def skonfiguruj_logowanie(poziom=logging.INFO):
         konsola = logging.StreamHandler(sys.stderr)
         konsola.setFormatter(formatter)
         korzen.addHandler(konsola)
+
+    # Nieobsłużony wyjątek (w wątku głównym albo w wątku bez własnego try)
+    # Python wypisuje na stderr — a przy pythonw stderr nie istnieje, więc
+    # ślad przepadał. Teraz trafia do dziennika; strażnik restartu
+    # (straznik.py) pokazuje go potem na Telegramie.
+    def zapisz_wyjatek(typ, wartosc, slad):
+        if issubclass(typ, (KeyboardInterrupt, SystemExit)):
+            sys.__excepthook__(typ, wartosc, slad)
+            return
+        logging.getLogger("wyjatek").critical("Nieobsłużony wyjątek", exc_info=(typ, wartosc, slad))
+
+    sys.excepthook = zapisz_wyjatek
+    threading.excepthook = lambda a: zapisz_wyjatek(a.exc_type, a.exc_value, a.exc_traceback)
 
     # Biblioteki potrafią być bardzo gadatliwe na poziomie DEBUG/INFO.
     # Uciszamy je, żeby w dzienniku było widać komunikaty Jarvisa, a nie szum.

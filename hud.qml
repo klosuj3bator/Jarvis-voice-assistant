@@ -45,6 +45,49 @@ Item {
     readonly property var parametry: stany[stan] || ({})
     // Wiersze odczytów w rogu ekranu — gotowe napisy składa gui.py.
     property var odczyty: []
+    // Ostatnie akcje Jarvisa, od najnowszej: [{czas, tekst}] (akcje.py).
+    property var akcje: []
+    // Tryb tapety (gui.py): bez podpowiedzi klawiszy i bez odczytu sieci,
+    // ruch z TYKACZA zamiast animatorów (opis przy TYKACZ).
+    property bool tapeta: false
+    property int klatkiTapety: 60
+    // Gra albo film na pełnym ekranie — ruch stoi (opis przy WSTRZYMANIE).
+    property bool wstrzymane: false
+
+    // ===== Panel boczny (Panel.qml, dane z panel.py) =====
+    // Wysuwa się z prawej krawędzi, gdy monitor jest jeden albo "Tryb
+    // 2 ekranów" jest wyłączony (inaczej panel ma własny pasek — pasek_boczny.py).
+    property QtObject mostPanelu: null
+    property bool panelWHud: false
+    property bool panelPrzypiety: false       // "Wysuń panel" z menu przy zegarku
+    property bool panelAuto: false            // wysunięty sam, na czas rozmowy
+    property var elementyPanelu: []
+    readonly property bool panelWysuniety: panelWHud && (panelPrzypiety || panelAuto)
+    readonly property real szerokoscPanelu: Math.max(300, Math.min(440, width * 0.22))
+    readonly property real uchwyt: panelWHud ? rozmiar * 1.5 : 0
+    property real wysuniecie: panelWysuniety ? szerokoscPanelu : 0
+    Behavior on wysuniecie { NumberAnimation { duration: 350; easing.type: Easing.OutCubic } }
+
+    Connections {
+        target: hud.mostPanelu
+        function onWHud(tak) { hud.panelWHud = tak }
+        function onPrzypiety(tak) { hud.panelPrzypiety = tak }
+        function onElementy(e) { hud.elementyPanelu = e }
+    }
+
+    // W trakcie rozmowy panel wysuwa się sam — żeby było widać jej zapis —
+    // a 20 sekund po jej końcu chowa się z powrotem.
+    onStanChanged: {
+        if (stan === "listening" || stan === "processing" || stan === "speaking") {
+            if (elementyPanelu.indexOf("rozmowa") >= 0) {
+                panelAuto = true
+                zwijaniePanelu.stop()
+            }
+        } else if (panelAuto) {
+            zwijaniePanelu.restart()
+        }
+    }
+    Timer { id: zwijaniePanelu; interval: 20000; onTriggered: hud.panelAuto = false }
 
     // Odbiór sygnałów z gui.py. To zwykły JavaScript w wątku GUI —
     // nie czeka na Pythona, więc nie przycina animacji.
@@ -59,7 +102,28 @@ Item {
         function onOdczyty(wiersze) {
             hud.odczyty = wiersze
         }
+        function onAkcje(lista) {
+            hud.akcje = lista
+        }
+        function onTapeta(wlaczona) {
+            hud.tapeta = wlaczona
+        }
+        function onWstrzymaj(tak) {
+            hud.wstrzymane = tak
+        }
+        function onPostep(procent, opis) {
+            hud.postepProcent = procent
+            hud.postepOpis = opis
+        }
     }
+
+    // Postęp startu (rozruch.py) — pokazywany w stanie "uruchamianie".
+    property int postepProcent: 0
+    property string postepOpis: ""
+
+    // Zasłona: obraz zwykłej tapety, którym HUD zakrywa się tuż przed zejściem
+    // z pulpitu (gui.py, _zakryj_tapeta). Pusta = brak zasłony.
+    property string zaslona: ""
 
     Timer {
         id: powrotZBledu
@@ -104,7 +168,8 @@ Item {
         var p = parametry
         if (p.tempo === undefined)
             return
-        var teraz = Date.now()
+        // W pauzie czas stoi w chwili jej rozpoczęcia — liczymy tak, jakby było "wtedy".
+        var teraz = hud.wstrzymane ? hud.pauzaOdMs : Date.now()
         var t = ((teraz - startStanuMs) / 1000) % dlugoscZegaraS
         var e = pierscienie
 
@@ -142,6 +207,21 @@ Item {
 
         startStanuMs = teraz
         startPrzejsciaMs = teraz
+        if (hud.wstrzymane) {
+            // Nowy stan w trakcie gry (np. rozmowa z Jarvisem) widać od razu,
+            // ale bez ruchu i bez płynnego przejścia barw.
+            e.kolorStary = e.kolorNowy
+            e.akcentStary = e.akcentNowy
+            e.biegSila = Qt.vector2d(e.biegSila.y, e.biegSila.y)
+            e.smugaSila = Qt.vector2d(e.smugaSila.y, e.smugaSila.y)
+            e.czas = 0
+            e.przejscie = 1
+            return
+        }
+        if (hud.tapeta) {
+            klatka()          // dalej ruch prowadzi tykacz
+            return
+        }
         zegar.restart()
         przejscie.restart()
         // Oddech napisu restartujemy o chwilę później: jego zakres i tempo
@@ -151,6 +231,85 @@ Item {
             oddechNapisu.restart()
             oddechEtykiety.restart()
         })
+    }
+
+    // ===== WSTRZYMANIE =====
+    //
+    // Gdy gra albo film zajmuje cały ekran, gui.py wysyła `wstrzymaj`.
+    // Zatrzymujemy wszystko, co rusza się co klatkę: zegar pierścieni,
+    // przejście barw i oddech napisów. Scena rysuje się wtedy tylko przy
+    // zmianie treści — zegar i odczyty raz na sekundę — zamiast 240 razy.
+    //
+    // Pierścienie zamierają dokładnie tam, gdzie były: "czas" zostaje
+    // ustawiony na chwilę pauzy. Przy wznowieniu przesuwamy początek stanu
+    // o długość przerwy, więc zastosujStan() podejmuje ruch bez skoku.
+    property real pauzaOdMs: 0
+    onWstrzymaneChanged: wstrzymane ? zatrzymajRuch() : wznowRuch()
+
+    function zatrzymajRuch() {
+        pauzaOdMs = Date.now()
+        var e = pierscienie
+        zegar.stop()
+        przejscie.stop()
+        oddechNapisu.stop()
+        oddechEtykiety.stop()
+        e.czas = ((pauzaOdMs - startStanuMs) / 1000) % dlugoscZegaraS
+        var u = Math.min(1, (pauzaOdMs - startPrzejsciaMs) / czasPrzejsciaMs)
+        e.przejscie = 1 - Math.pow(1 - u, 3)       // ta sama krzywa co w animatorze
+    }
+
+    function wznowRuch() {
+        var przerwa = Date.now() - pauzaOdMs
+        startStanuMs += przerwa
+        startPrzejsciaMs += przerwa
+        zastosujStan()
+    }
+
+    // ===== TYKACZ — ruch tapety =====
+    //
+    // Animatory rysują klatkę za klatką tak szybko, jak pozwoli ekran. W zwykłym
+    // oknie to dobrze: Qt trzyma się odświeżania monitora (240 Hz = 240 klatek).
+    // Na pulpicie Windows tego tempa nie pilnuje — zmierzone 29.09: tapeta na
+    // monitorze 60 Hz rysowała 248-377 klatek na sekundę, cztery razy za dużo,
+    // i to przez cały dzień, także przy grach w oknie.
+    //
+    // Dlatego na tapecie ruch prowadzi zwykły Timer: klatkiTapety razy na
+    // sekundę liczy te same wartości, które animatory liczyłyby same, a scena
+    // rysuje się tylko wtedy, gdy coś się zmieniło — czyli właśnie tyle razy.
+    Timer {
+        id: tykacz
+        interval: Math.round(1000 / hud.klatkiTapety)
+        repeat: true
+        running: hud.tapeta && !hud.wstrzymane
+        onTriggered: hud.klatka()
+    }
+
+    function klatka() {
+        var teraz = Date.now()
+        var p = parametry
+        var t = ((teraz - startStanuMs) / 1000) % dlugoscZegaraS
+        var u = Math.min(1, (teraz - startPrzejsciaMs) / czasPrzejsciaMs)
+        pierscienie.czas = t
+        pierscienie.przejscie = 1 - Math.pow(1 - u, 3)       // krzywa OutCubic jak w animatorze
+        // Oddech napisów: to samo co OpacityAnimator z krzywą InOutSine —
+        // od minimum do maksimum i z powrotem, pół cyklu w pi / tempo sekund.
+        var faza = (1 - Math.cos((p.tempo || 1) * t)) / 2
+        var moc = (p.min || 0.6) + ((p.max || 0.7) - (p.min || 0.6)) * faza
+        napis.opacity = Math.min(1, 0.55 + 0.45 * moc)
+        etykieta.opacity = Math.max(0.55, moc)
+    }
+
+    // Wejście w tapetę i wyjście z niej w trakcie działania: przekazanie
+    // ruchu między animatorami a tykaczem, bez skoku (ten sam startStanuMs).
+    onTapetaChanged: {
+        if (wstrzymane)
+            return                        // pauza i tak wszystko trzyma
+        if (tapeta) {
+            zegar.stop(); przejscie.stop(); oddechNapisu.stop(); oddechEtykiety.stop()
+            klatka()
+        } else {
+            zastosujStan()                // animatory ruszają od bieżącego miejsca
+        }
     }
 
     // Zegar kręci się w kółko co godzinę. Wszystkie prędkości obrotu
@@ -284,6 +443,42 @@ Item {
         }
     }
 
+    // Pasek postępu startu pod całą tarczą reaktora — tylko w trakcie
+    // uruchamiania. Podziałka kończy się na 1.0 promienia, a poświata
+    // gaśnie na 1.15, więc 1.12 to już "pod rdzeniem", ale jeszcze nad
+    // napisami w dolnych rogach.
+    Item {
+        visible: hud.stan === "uruchamianie"
+        x: hud.cx - width / 2
+        y: hud.cy + hud.promien * 1.12
+        width: hud.promien * 0.8
+        height: hud.promien * 0.14
+
+        Rectangle {
+            width: parent.width; height: Math.max(2, hud.promien * 0.008)
+            color: hud.kolorZ(hud.kolorTekstu, 0.18)
+            Rectangle {
+                height: parent.height
+                width: parent.width * hud.postepProcent / 100
+                color: hud.kolorZ(hud.kolorTekstu, 0.9)
+                // Krótka animacja tylko przy zmianie procentu — scena i tak
+                // kręci się wtedy pełną parą.
+                Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+            }
+        }
+        Text {
+            y: hud.promien * 0.035
+            width: hud.promien * 1.3
+            x: (parent.width - width) / 2
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+            text: hud.postepProcent + " %" + (hud.postepOpis ? "   //   " + hud.postepOpis.toUpperCase() : "")
+            font.family: hud.rodzina; font.pixelSize: Math.max(9, hud.promien * 0.032)
+            font.letterSpacing: hud.promien * 0.008
+            color: hud.blady
+        }
+    }
+
     // ===== 4. Odczyty w rogach =====
     readonly property color jasny: kolorZ(kolorTekstu, 220 / 255)
     readonly property color blady: kolorZ(kolorTekstu, 120 / 255)
@@ -295,7 +490,8 @@ Item {
     property string dzien: ""
     Timer {
         // Co ćwierć sekundy, żeby sekundy na zegarze nie "przeskakiwały".
-        interval: 250
+        // W pauzie raz na sekundę — każda zmiana napisu to jedna klatka.
+        interval: hud.wstrzymane ? 1000 : 250
         running: true
         repeat: true
         triggeredOnStart: true
@@ -313,7 +509,8 @@ Item {
     Text {
         x: hud.margines; y: hud.margines + hud.rozmiar - metrykaMala.ascent
         font.family: hud.rodzina; font.pixelSize: hud.rozmiar; font.letterSpacing: hud.rozmiar * 0.12
-        text: "J.A.R.V.I.S.  //  SYSTEM ONLINE"; color: hud.jasny
+        text: "J.A.R.V.I.S.  //  " + (hud.stan === "uruchamianie" ? "URUCHAMIANIE" : "SYSTEM ONLINE")
+        color: hud.jasny
     }
     Text {
         x: hud.margines; y: hud.margines + hud.rozmiar * 2 + 8 - metrykaMala.ascent
@@ -331,15 +528,16 @@ Item {
         text: hud.dzien; color: hud.blady
     }
 
-    // Prawy górny róg: procesor, pamięć, sieć i temperatura — każde z paskiem.
+    // Prawy górny róg: procesor, pamięć, karta graficzna i sieć — każde z paskiem.
+    // Na tapecie bez sieci (wiersze "tylkoOkno").
     Repeater {
-        model: hud.odczyty
+        model: hud.tapeta ? hud.odczyty.filter(function(w) { return !w.tylkoOkno }) : hud.odczyty
         Item {
             id: odczyt
             required property var modelData
             required property int index
             readonly property real szer: hud.rozmiar * 14
-            x: hud.width - hud.margines - szer
+            x: hud.width - hud.margines - szer - hud.wysuniecie - hud.uchwyt
             y: hud.margines + index * hud.rozmiar * 3.6
             width: szer
 
@@ -380,15 +578,86 @@ Item {
         }
     }
 
-    // Lewy dolny róg: tryb. Prawy dolny: podpowiedzi klawiszy.
+    // Lewy dolny róg: ostatnie akcje Jarvisa (akcje.py), nad nimi nagłówek,
+    // pod nimi tryb. Najnowsza akcja najjaśniejsza, starsze coraz bledsze.
+    Column {
+        x: hud.margines
+        y: hud.height - hud.margines - metrykaMala.ascent - hud.rozmiar * 1.6 - height
+        spacing: hud.rozmiar * 0.45
+        visible: hud.akcje.length > 0
+
+        Text {
+            font.family: hud.rodzina; font.pixelSize: hud.rozmiar * 0.8
+            font.letterSpacing: hud.rozmiar * 0.12
+            text: "OSTATNIE AKCJE"; color: hud.blady
+        }
+        Repeater {
+            model: hud.akcje
+            Row {
+                required property var modelData
+                required property int index
+                spacing: hud.rozmiar * 0.8
+                opacity: Math.max(0.35, 1 - index * 0.14)
+                Text {
+                    font.family: hud.rodzinaMono; font.pixelSize: hud.rozmiar * 0.9
+                    text: parent.modelData.czas; color: hud.kolorZ(hud.akcentTekstu, 200 / 255)
+                }
+                Text {
+                    font.family: hud.rodzina; font.pixelSize: hud.rozmiar
+                    text: parent.modelData.tekst; color: hud.jasny
+                }
+            }
+        }
+    }
     Text {
         x: hud.margines; y: hud.height - hud.margines - metrykaMala.ascent
         font.family: hud.rodzina; font.pixelSize: hud.rozmiar; font.letterSpacing: hud.rozmiar * 0.12
         text: "TRYB  //  " + (hud.parametry.etykieta || ""); color: hud.jasny
     }
+    // Prawy dolny róg: podpowiedzi klawiszy (na tapecie klawiatura do HUD-a
+    // nie trafia) albo informacja, czemu ruch stoi.
     Text {
-        x: hud.width - hud.margines - width; y: hud.height - hud.margines - metrykaMala.ascent
+        x: hud.width - hud.margines - width - hud.wysuniecie - hud.uchwyt
+        y: hud.height - hud.margines - metrykaMala.ascent
         font.family: hud.rodzina; font.pixelSize: hud.rozmiar; font.letterSpacing: hud.rozmiar * 0.12
-        text: "ESC  SCHOWAJ      F11  OKNO"; color: hud.blady
+        text: hud.wstrzymane ? "PAUZA  //  PEŁNY EKRAN"
+                             : hud.tapeta ? "TAPETA" : "ESC  SCHOWAJ      F11  OKNO"
+        color: hud.wstrzymane ? hud.kolorZ(hud.akcentTekstu, 200 / 255) : hud.blady
+    }
+
+    // ===== 5. Panel boczny, wysuwany z prawej =====
+    // Uchwyt: wąski pasek przy krawędzi, widoczny także przy schowanym panelu.
+    Rectangle {
+        visible: hud.panelWHud
+        x: hud.width - hud.uchwyt - hud.wysuniecie
+        width: hud.uchwyt; height: hud.height
+        color: hud.kolorZ(hud.kolorTekstu, 0.07)
+        Rectangle { width: 1; height: parent.height; color: hud.kolorZ(hud.kolorTekstu, 0.35) }
+        Text {
+            anchors.centerIn: parent
+            rotation: -90
+            text: hud.panelWysuniety ? "PANEL  ▸" : "◂  PANEL"
+            font.family: hud.rodzina; font.pixelSize: hud.rozmiar * 0.75
+            font.letterSpacing: hud.rozmiar * 0.2
+            color: hud.blady
+        }
+    }
+    // Na samej górze: zasłona z tapety (opis przy właściwości "zaslona").
+    Image {
+        anchors.fill: parent
+        z: 1000
+        visible: hud.zaslona !== ""
+        source: hud.zaslona
+        cache: false
+    }
+
+    Panel {
+        visible: hud.wysuniecie > 0
+        x: hud.width - hud.wysuniecie
+        width: hud.szerokoscPanelu; height: hud.height
+        most: hud.mostPanelu
+        elementy: hud.elementyPanelu
+        rodzina: hud.rodzina; rodzinaMono: hud.rodzinaMono
+        kolor: hud.kolorTekstu; akcent: hud.akcentTekstu
     }
 }

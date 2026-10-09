@@ -13,6 +13,10 @@ memory.json.tmp
 slownik.json
 slownik.json.tmp
 .spotify_cache_slownik
+# Znaczniki "HUD jest teraz tapetą" (tapeta.py) i "pasek zajmuje krawędź" (pasek_boczny.py)
+tapeta.aktywna
+panel.pasek
+
 # Historia rozmów z Jarvisem — prywatna
 pamiec.json
 pamiec.json.tmp

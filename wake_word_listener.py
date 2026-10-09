@@ -335,6 +335,15 @@ def _przygotuj(callback_stanu=None):
         _zarejestrowano_atexit = True
 
 
+def przygotuj(callback_stanu=None):
+    """
+    To samo co _przygotuj(), z zewnątrz: main.py woła to po rozruchu, żeby
+    mikrofon był otwarty, ZANIM Jarvis powie "Systemy gotowe". Przy braku
+    mikrofonu czeka na niego (HUD: "brak mikrofonu").
+    """
+    _przygotuj(callback_stanu)
+
+
 def _otworz_mikrofon(callback_stanu=None):
     """
     Otwiera strumień mikrofonu, a jeśli mikrofonu nie ma — CZEKA, aż się pojawi.
@@ -671,9 +680,9 @@ def _wczytaj_model_potwierdzenia():
     """
     Wczytuje mały model Whispera, którym potwierdzamy niepewne trafienia.
 
-    Wołane LENIWIE — dopiero przy pierwszym podejrzeniu. Jeśli wymawiasz
-    wake word wyraźnie i detektor radzi sobie sam, ten model nigdy się
-    nie wczyta i nie zajmie pamięci.
+    Przy starcie Jarvisa ładuje go z wyprzedzeniem rozruch.py (w tle,
+    równolegle z resztą) — pierwsze podejrzenie nie czeka wtedy na model.
+    Bez rozruchu wczytuje się leniwie, przy pierwszym podejrzeniu.
 
     Zwraca: obiekt WhisperModel.
     """
@@ -924,6 +933,29 @@ def _zapewnij_model_whispera():
     with _blokada_whispera:
         if _model_whisper is None:
             _model_whisper = _wczytaj_model_whisper()
+
+
+# --- Ładowanie z wyprzedzeniem, równolegle (rozruch.py) ---
+#
+# Normalnie modele wczytują się leniwie: detektor i Whisper przy pierwszym
+# czuwaniu, VAD przy pierwszej rozmowie, mały Whisper przy pierwszym
+# podejrzeniu. Przy starcie rozruch.py woła te funkcje z osobnych wątków,
+# żeby wszystko było gotowe, zanim padnie pierwsze "Hey Jarvis" — wtedy
+# leniwe ładowanie niżej po prostu zastaje gotowe modele.
+
+def zaladuj_detektor():
+    """Detektor "Hey Jarvis" i detektor mowy (VAD)."""
+    global _detektor
+    if _detektor is None:
+        _detektor = _utworz_detektor()
+    _przygotuj_vad()
+
+
+def zaladuj_potwierdzanie():
+    """Mały Whisper do potwierdzania niepewnych "Hey Jarvis"."""
+    global _model_potwierdzenia
+    if _model_potwierdzenia is None:
+        _model_potwierdzenia = _wczytaj_model_potwierdzenia()
 
 
 def przepisz_nagranie(audio):

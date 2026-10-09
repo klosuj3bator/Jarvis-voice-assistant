@@ -1,216 +1,129 @@
-# 🤖 Jarvis — osobisty asystent głosowy
+# 🤖 Jarvis — a personal voice assistant for Windows
 
-Asystent głosowy dla Windows inspirowany Jarvisem z filmów o Iron Manie. Mówisz **„Hey Jarvis”**, a on rozumie polecenia w naturalnym języku, prowadzi rozmowę i sam sięga po narzędzia: puszcza muzykę w Spotify, otwiera programy i strony, pilnuje przypomnień, czyta kalendarz i pocztę, odpowiada na pytania z internetu. Możesz z nim też pisać i nagrywać głosówki przez Telegram.
+An Iron Man–style assistant you talk to in Polish. Say **"Hey Jarvis"** and speak naturally: a Claude agent decides which tools to use, answers out loud and keeps the conversation going. Wake-word detection and speech recognition run locally; you can also reach Jarvis from your phone via Telegram.
 
-Mózgiem jest model **Claude** (Anthropic), a rozpoznawanie mowy i słowa aktywującego działa **lokalnie** na Twoim komputerze. Rozmawia po polsku.
+## ✨ Key features
 
-## ✨ Co potrafi
+- 🎙️ **Conversation with interruptions** — "Hey Jarvis" once, then keep talking. Cut in mid-answer and it stops mid-word; "mów dalej" (go on) resumes exactly where it was cut off. In headphones mode any word interrupts it
+- 🧠 **Agent with tools** — one Claude tool-use loop (`agent.py`) with 31 tools plus web search; it sees tool results and retries on errors. Long-term memory, saved only when you ask
+- 🎵 **Spotify** — songs, albums, pause, next, "what's playing", shuffle, repeat
+- 📝 **Notes** — voice notes saved as dated Markdown files
+- ⏰ **Reminders and timers** — "in 20 minutes", "tomorrow at eight"; spoken and sent to Telegram, survive restarts
+- 📅 **Google Calendar** (read-only) — "what do I have tomorrow?", recurring events, morning briefing, "welcome back" summary
+- 📧 **Gmail with rules** (read-only, up to 3 accounts) — search mail and set watch rules ("tell me when a mail from Allegro arrives"); misheard account names are matched fuzzily
+- 🖥️ **System control** — apps from the Start menu, websites in Opera GX, volume, brightness, lock, sleep, restart/shutdown (after confirmation), PC status, reading the screen, clipboard translate/summarise
+- 📱 **Telegram** — chat by text or voice note from your phone; reminders, mail alerts and screenshots come to you
+- 🛠️ **Remote Claude Code tasks** — `/kod <task>` lets Claude Code (Opus 5.5) edit Jarvis's own source in a sandbox; `/zatwierdz` commits, `/cofnij` undoes, `/restart` rolls back automatically if the new version fails to start
+- 💫 **Iron Man HUD** — full-screen reactor reacting to state, live wallpaper mode, side panel on a second monitor
 
-**Rozmowa i głos**
-- 🎙️ **„Hey Jarvis”** — nasłuch w tle; przy polskiej wymowie niepewne trafienia potwierdza małym modelem Whispera
-- 💬 **Rozmowa bez powtarzania „Hey Jarvis”** — po pierwszym poleceniu słucha dalej; odróżnia zdania do siebie od rozmów ludzi w pokoju
-- ✋ **Wchodzenie w słowo, jak w rozmowie z człowiekiem** — „Hey Jarvis” w trakcie odpowiedzi: milknie w pół słowa i od razu słucha. Pamięta, w którym miejscu mu przerwałeś: „mów dalej” podejmuje wątek dokładnie stamtąd, dopytanie o temat dostaje odpowiedź w kontekście, a zmiana tematu — nowy temat. Rozmowa trwa dalej bez ponownego „Hey Jarvis”
-- 🎧 **Tryb słuchawek** (przełącznik w menu przy zegarku) — przerywa mu każde Twoje słowo, nie tylko „Hey Jarvis”
-- 🗣️ **Rozpoznawanie mowy lokalnie** (faster-whisper) ze słownikiem nazw własnych — Twoi wykonawcy, albumy i aplikacje; „zapamiętaj słowo Tarcho Terror” dopisuje własne
-- 🔊 **Odpowiedzi głosem**, zdanie po zdaniu, bez czekania na całą odpowiedź
-- 🧠 **Pamięć długoterminowa** — „zapamiętaj, że pracuję do 16”, „co o mnie wiesz?”; zapisuje tylko na wyraźną prośbę i nigdy nie zapisuje haseł, kluczy ani kodów
+## 🧠 Architecture
 
-**Muzyka i komputer**
-- 🎵 **Spotify** — utwory i albumy, pauza, następny, „co teraz gra”, losowo, powtarzanie
-- 🚀 **Programy** — uruchamianie i zamykanie; sam znajduje zainstalowane aplikacje w menu Start
-- 🌐 **Strony w Operze GX** — otwieranie adresów i wyszukiwanie fraz (Google, YouTube i inne)
-- 🔊 **Sterowanie komputerem** — głośność, jasność, blokada, uśpienie, restart i wyłączenie (te dwa ostatnie dopiero po potwierdzeniu)
-- 👁️ **Czytanie ekranu** — „co jest na ekranie?”, „przeczytaj ten błąd”, „streść tę stronę”
-- 📋 **Schowek** — tłumaczenie, streszczanie i poprawianie skopiowanego tekstu
-- 🩺 **Stan komputera** — procesor, RAM, karta NVIDIA, dyski, działające programy, pobierania
+```mermaid
+flowchart TD
+    MIC["🎙️ Microphone<br/>wake word + Whisper (local)"] --> AG
+    TG["📱 Telegram<br/>owner only"] -- "text, voice notes" --> AG
+    AG["<b>agent.py</b><br/>Claude Sonnet 5 · tool-use loop · memory"]
+    AG --> OUT["🔊 Speech (edge-tts)<br/>📱 Telegram reply"]
+    AG <--> TOOLS
 
-**Organizacja i informacje**
-- ⏰ **Przypomnienia i timery** — „za 20 minut”, „jutro o ósmej”; przetrwają restart
-- 📝 **Notatki głosowe** — zapis do plików Markdown z datą
-- 📅 **Kalendarz Google** (tylko odczyt) — „co mam jutro?”, z wydarzeniami powtarzającymi się
-- 📧 **Poczta Gmail** (tylko odczyt) — szukanie maili i czujki „daj znać, jak przyjdzie mail od…”
-- ☀️ **Poranny briefing** — „co dziś?”: data, pogoda, kalendarz, przypomnienia w kilku zdaniach
-- 🔎 **Internet** — pogoda, wyniki, bieżące sprawy przez wyszukiwarkę
+    subgraph TOOLS ["Tools — 31 + web search"]
+        T1["🎵 Spotify<br/>spotify_controller"] ~~~ T5["📧 Gmail search + rules<br/>email_monitor"]
+        T2["🖥️ Apps · web · system<br/>app_launcher · przegladarka<br/>system_control · stan_komputera"] ~~~ T6["👁️ Screen · 📋 clipboard<br/>schowek"]
+        T3["📝 Notes · ⏰ reminders<br/>notes · reminders"] ~~~ T7["🧠 Memory · vocabulary<br/>pamiec · slownik"]
+        T4["📅 Calendar · briefing<br/>kalendarz · briefing · powitanie"] ~~~ T8["🔎 Web search<br/>Anthropic server tool"]
+    end
 
-**Telefon i wygląd**
-- 📱 **Telegram** — rozmowa tekstem i głosówkami, odpowiedzi też głosówkami, przypomnienia i powiadomienia o mailach na telefon; „stop” przerywa odpowiedź, „dokończ” ją wznawia
-- 💫 **HUD na pełnym ekranie** w stylu Iron Mana — pierścienie reagujące na stan (czuwam / słucham / myślę / mówię), zegar, procesor, pamięć, sieć i temperatura
-- 📌 **Działanie w tle** — ikona w zasobniku przy zegarku, w jej menu **Ustawienia** i **Tryb słuchawek**
+    TG -- "/kod /zatwierdz /cofnij /restart<br/>bypass the agent" --> RC["<b>zdalny_kod.py</b><br/>Claude Code, sandboxed"]
+    RC --> WD["<b>straznik.py</b><br/>restart watchdog + rollback"]
+```
 
-## 💬 Przykładowe polecenia
+Every utterance, spoken or from Telegram, goes to `agent.py`. It sends the text to Claude with the tool definitions, runs the tools Claude asks for and feeds their results back until the answer is ready. The answer is spoken sentence by sentence while the rest is still being generated. Reminders, mail rules and HUD readings run in background threads and never call the model. Telegram coding commands skip the agent entirely, so the model has no way to start Claude Code on its own.
 
-Powiedz **„Hey Jarvis”**, a potem na przykład:
+## 📱 Telegram and remote coding
 
-- *„Puść album Nevermind”*, *„Następna”*, *„Co to za kawałek?”*
-- *„Otwórz Chrome”*, *„Odpal Operę GX i włącz mi Gmaila”*, *„Wpisz w operze przepis na pizzę”*
-- *„Przycisz do trzydziestu procent”*, *„Zablokuj ekran”*
-- *„Przypomnij mi za 20 minut o praniu”*, *„Timer na 5 minut”*
-- *„Co dziś?”*, *„Co mam jutro?”*, *„O której mam dentystę w poniedziałek?”*
-- *„Czy przyszedł mail ze słowami rekrutacja, praca, AI w ciągu 4 godzin?”*, *„Daj znać, jak przyjdzie mail od Allegro”*
-- *„Zapamiętaj, że pracuję do szesnastej”*, *„Co o mnie wiesz?”*, *„Zapomnij, do której pracuję”*
-- W trakcie odpowiedzi: *„Hey Jarvis”* → *„mów dalej”*, *„a ile to kosztuje?”*, *„nie, pytałem o co innego”*
-- *„Przetłumacz to, co skopiowałem”*, *„Co jest na ekranie?”*, *„Co mi zjada procesor?”*
-- *„Zanotuj, że mam oddać książkę”*, *„Jaka jutro pogoda?”*
+The bot answers only you (both chat and sender ID are checked). Chat and voice notes go to the agent; "stop" interrupts an answer, and a PC restart or shutdown needs a typed "tak". These commands go straight to Claude Code instead:
 
-## 📥 Instalacja
+| Command | What it does |
+|---|---|
+| `/kod <task>` | Runs Claude Code in Jarvis's folder in the background, then sends its summary and the changed files |
+| `/zatwierdz [message]` | Commits only the files changed by `/kod` tasks |
+| `/cofnij` | Reverts uncommitted `/kod` changes; your own uncommitted work stays |
+| `/restart` | Restarts Jarvis; if the new version isn't up within a minute, it returns to the last working version and tells you why |
 
-**Wymagania:** Windows 10 lub 11 (64-bit), mikrofon, internet, ok. 1 GB miejsca (program + modele mowy) i klucz API Anthropic z doładowanymi środkami.
+Claude Code can only read and edit files in the project; from the shell it may run nothing but `git status` and `git diff`, enforced by a hook stored outside the project. It runs on your Claude subscription, not Jarvis's API key. Requires the source version, Git and the [Claude Code CLI](https://code.claude.com) logged in once.
 
-### Instalator (dla większości osób)
+## 📥 Installation
 
-1. Pobierz `JarvisSetup.exe` z zakładki [Releases](https://github.com/klosuj3bator/Jarvis-voice-assistant/releases) i uruchom. Nie potrzebuje uprawnień administratora.
-2. Windows może ostrzec przed nieznanym wydawcą — instalator nie jest jeszcze podpisany certyfikatem. Wybierz **Więcej informacji → Uruchom mimo to**.
-3. Przy pierwszym uruchomieniu kreator poprosi o klucze i pobierze modele mowy (ok. 560 MB, zwykle kilka minut).
+**Requirements:** Windows 10/11 (64-bit), a microphone, internet, ~1 GB of disk space and an Anthropic API key with credit (an ordinary sentence costs about 0.3–0.6 ¢).
 
-Instalator dodaje skrót na pulpicie, wpis w menu Start i — jeśli zaznaczysz — autostart z Windowsem. Deinstalator jest w Ustawieniach Windows → Aplikacje.
+**Installer:** download `JarvisSetup.exe` from [Releases](https://github.com/klosuj3bator/Jarvis-voice-assistant/releases) and run it (no admin rights). It isn't code-signed yet, so Windows may show **More info → Run anyway**.
 
-### Z kodu źródłowego
-
-Projekt jest rozwijany na Pythonie 3.14.
+**From source** (Python 3.14):
 
 ```bash
 git clone https://github.com/klosuj3bator/Jarvis-voice-assistant.git
-```
-
-```bash
 cd Jarvis-voice-assistant
-```
-
-```bash
 python -m venv venv
-```
-
-```bash
 venv\Scripts\activate
-```
-
-```bash
 pip install -r requirements.txt
-```
-
-```bash
 python main.py
 ```
 
-`python main.py` pokazuje dziennik na żywo w terminalu; `Jarvis.pyw` uruchamia Jarvisa w tle, bez okna konsoli.
+`Jarvis.pyw` runs it in the background without a console.
 
-## ⚙️ Konfiguracja
+### Setup wizard
 
-Przy pierwszym uruchomieniu otwiera się **kreator**. Wymagany jest tylko klucz Anthropic — Spotify, Telegram, Gmail i kalendarz możesz pominąć i dodać później w **Ustawieniach** (prawy przycisk na ikonie Jarvisa przy zegarku). Przy każdym kluczu jest instrukcja i link, a przycisk **„Sprawdź i dalej”** łączy się z usługą, zanim puści Cię dalej — zły klucz wychodzi od razu.
+On first launch a wizard walks you through the keys. Later you can reopen it as **Settings** from the tray icon. Each page explains where to get the key, and **"Sprawdź i dalej"** (check & continue) tests it against the service before moving on. Only Anthropic is required; skipped features stay off until you add them. The installed version also downloads the speech models here (~560 MB). The last pages set the wallpaper monitor and the side panel.
 
-<p align="center"><img src="docs/kreator.png" width="620" alt="Kreator pierwszego uruchomienia"></p>
+<p align="center"><img src="docs/kreator.png" width="620" alt="Setup wizard"></p>
 
-| Usługa | Do czego | Skąd klucz |
+**Required**
+
+| Key | Where to get it |
+|---|---|
+| `ANTHROPIC_API_KEY` | [platform.claude.com](https://platform.claude.com) → API Keys |
+
+**Optional**
+
+| Feature | Keys | Where to get them |
 |---|---|---|
-| **Anthropic** (wymagany) | mózg Jarvisa — model Claude | [platform.claude.com](https://platform.claude.com) → API Keys |
-| Spotify | muzyka (sterowanie wymaga konta Premium) | [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) → Create app, Redirect URI `http://127.0.0.1:8888/callback` |
-| Telegram | rozmowa z telefonu, powiadomienia | [@BotFather](https://t.me/BotFather) → `/newbot`; swoje ID wykryje kreator |
-| Gmail | szukanie maili, czujki | [hasło aplikacji](https://myaccount.google.com/apppasswords) (wymaga weryfikacji dwuetapowej) — nie zwykłe hasło |
-| Kalendarz Google | „co mam jutro?” | [ustawienia kalendarza](https://calendar.google.com/calendar/r/settings) → Integracja kalendarza → Tajny adres w formacie iCal |
+| Spotify (Premium) | `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET` | [Spotify dashboard](https://developer.spotify.com/dashboard) → Create app, redirect URI `http://127.0.0.1:8888/callback` |
+| Telegram | `TELEGRAM_JARVIS_TOKEN`, `TELEGRAM_OWNER_ID` | [@BotFather](https://t.me/BotFather) → `/newbot`; the wizard detects your ID |
+| Gmail (1–3 accounts) | `GMAIL_n_ADDRESS`, `GMAIL_n_APP_PASSWORD`, optional `GMAIL_n_NAME`, `GMAIL_DOMYSLNE` | an [app password](https://myaccount.google.com/apppasswords) per account (needs 2-step verification) |
+| Google Calendar | `GOOGLE_CALENDAR_ICAL_URL` | Calendar settings → Integrate calendar → secret address in iCal format |
 
-Funkcje bez kluczy są wyłączone — Jarvis mówi wtedy wprost, że dana funkcja nie jest skonfigurowana.
+Keys entered in the wizard are stored in `%APPDATA%\Jarvis\config.env`. The source version also reads a `.env` file (template: `.env.example`). Priority: Windows environment variables → Settings → `.env`.
 
-**Gdzie leżą klucze i dane.** Kreator zapisuje klucze w `%APPDATA%\Jarvis\config.env`. Wersja z instalatora trzyma tam też całą resztę: pamięć, notatki, przypomnienia, dziennik i modele mowy. Uruchamiana z kodu trzyma dane obok kodu, a klucze możesz też wpisać do pliku `.env` (wzór: `.env.example`) — kolejność ważności: zmienne środowiskowe Windows → Ustawienia → `.env`.
+## 🔒 Security
 
-**Słownik nazw ze Spotify (opcjonalnie).** Żeby Whisper lepiej rozpoznawał Twoich wykonawców, słownik zagląda do historii słuchania. To osobne uprawnienia, więc zgodę dajesz raz: `python slownik.py spotify`.
+- **Keys stay out of the repository.** They live in `%APPDATA%\Jarvis` or in a git-ignored `.env`, and never reach the log. The installer build and `/zatwierdz` both refuse to continue if a key value turns up in the files.
+- **The Telegram bot answers only its owner.** Messages from anyone else are ignored without a reply. Messages sent while Jarvis was off are skipped, not executed later.
+- **Mail is treated as data, never as instructions.** Once mail has been read, tools are locked in code until the end of that answer, so a stranger's email can't make Jarvis do anything. Gmail and the calendar are read-only.
+- **Audio stays local.** Microphone audio never leaves the PC; only the recognised text goes to Claude.
 
-## 🔒 Prywatność i bezpieczeństwo
+## 📂 Project structure
 
-- **Dźwięk z mikrofonu nie opuszcza komputera.** „Hey Jarvis” i rozpoznawanie mowy działają lokalnie; do Claude trafia tylko tekst polecenia. Tekst odpowiedzi idzie do syntezatora mowy Microsoftu (edge-tts).
-- **Maile i zaproszenia z kalendarza to dla Jarvisa wyłącznie dane.** Po odczytaniu poczty narzędzia są blokowane w kodzie do końca odpowiedzi — obcy mail nie wyda Jarvisowi polecenia. Poczta i kalendarz są tylko do odczytu.
-- **Telegram odpowiada wyłącznie Tobie** (Twoje ID), obcych ignoruje. Restart i wyłączenie komputera wymagają potwierdzenia.
-- **Pamięć tylko na prośbę.** Fakty zapisuje dopiero po „zapamiętaj”; hasła, klucze i kody są odrzucane w kodzie, a wypowiedzi wyglądające na hasło nie trafiają do dziennika.
-- **Klucze nigdy nie trafiają do dziennika** ani do repozytorium; skrypt budujący instalator sprawdza, czy w paczce nie ma prywatnych plików ani wartości kluczy.
-
-## 💰 Koszty
-
-Jarvis korzysta z płatnego API Anthropic (model Claude Sonnet 5, z cache promptów). Z prawdziwego używania (dziennik Jarvisa): zwykłe zdanie w rozmowie to **0,3–0,6 centa**, polecenie z narzędziem (np. „puść album…”) ok. 1 centa, pierwsze zdanie po uruchomieniu albo dłuższej przerwie 4–7 centów (wtedy instrukcje zapisują się do cache), pytanie z wyszukiwaniem w internecie ok. 4 centów. Sesja z kilkunastoma poleceniami kosztuje zwykle 10–20 centów. Koszt każdego zapytania i suma od startu są zapisywane w `jarvis.log`. Wątki w tle (przypomnienia, czujki poczty) nie wywołują Claude.
-
-## 🧠 Jak to działa
-
-```mermaid
-graph TD
-    A["Mikrofon — nasłuch w tle"] --> B{"'Hey Jarvis'?<br/>openWakeWord + Whisper tiny"}
-    B -- nie --> A
-    B -- tak --> C["Nagrywanie do ciszy (VAD)"]
-    C --> D["Rozpoznawanie mowy<br/>faster-whisper + słownik nazw"]
-    T["Telegram — tekst i głosówki"] --> E
-    D --> E["Agent Claude<br/>wybiera narzędzia"]
-    E --> F["Narzędzia: Spotify, programy, strony,<br/>przypomnienia, kalendarz, poczta,<br/>pamięć, ekran, schowek, internet"]
-    F --> E
-    E --> G["Mowa zdanie po zdaniu (edge-tts)<br/>albo odpowiedź na Telegramie"]
-    G --> H{"Mówisz dalej?"}
-    H -- "tak, bez 'Hey Jarvis'" --> C
-    H -- "cisza" --> A
-    G -. "'Hey Jarvis' w trakcie —<br/>przerwanie" .-> C
-```
-
-Jeden agent (`agent.py`) prowadzi całą rozmowę: sam decyduje, czy odpowiedzieć, czy sięgnąć po narzędzie, i widzi wyniki narzędzi, więc przy błędzie może spróbować inaczej. Przypomnienia i czujki poczty pilnuje osobny wątek, bez udziału modelu.
-
-## 🛠️ Stos technologiczny
-
-| Część | Technologia |
+| File | Purpose |
 |---|---|
-| Model językowy | Claude Sonnet 5 (Anthropic API) z narzędziami i wyszukiwarką |
-| Słowo aktywujące | openWakeWord (+ faster-whisper tiny do potwierdzeń) |
-| Rozpoznawanie mowy | faster-whisper (small, CPU) |
-| Synteza mowy | edge-tts, PyAV, sounddevice |
-| Interfejs | PySide6 (Qt Quick + shader HUD-a, okna Qt Widgets) |
-| Integracje | Spotipy, Telegram Bot API, IMAP (Gmail), iCalendar |
-| System | psutil, pywin32, pycaw, pynvml |
-| Instalator | PyInstaller + Inno Setup |
+| `main.py`, `Jarvis.pyw` | startup, listening and conversation loop |
+| `agent.py` | the Claude agent: instructions, tools, history, costs |
+| `wake_word_listener.py`, `tts.py` | wake word, recording, Whisper, interruptions; speech output |
+| `telegram_bridge.py` | Telegram chat and commands |
+| `zdalny_kod.py`, `straznik.py` | remote Claude Code tasks; restart watchdog and rollback |
+| `spotify_controller.py`, `app_launcher.py`, `przegladarka.py`, `system_control.py` | music, apps, browser, PC control |
+| `notes.py`, `reminders.py`, `kalendarz.py`, `email_monitor.py`, `briefing.py`, `powitanie.py` | notes, reminders, calendar, mail, briefing, greeting |
+| `pamiec.py`, `slownik.py`, `schowek.py`, `stan_komputera.py` | memory, vocabulary, clipboard, PC status |
+| `gui.py`, `hud.qml`, `Panel.qml`, `tapeta.py`, `panel.py`, `pasek_boczny.py` | HUD, wallpaper mode, side panel |
+| `setup_wizard.py`, `konfiguracja.py`, `rozruch.py` | wizard and Settings, key loading, parallel startup |
+| `instalator/` | installer build: PyInstaller, Inno Setup, privacy check (`python instalator/zbuduj.py`) |
 
-## 📂 Struktura projektu
+## ⚠️ Known limitations
 
-| Plik | Co robi |
-|---|---|
-| `main.py`, `Jarvis.pyw` | start programu, pętla nasłuchu i rozmowy |
-| `agent.py` | agent Claude: instrukcje, narzędzia, historia, koszty |
-| `wake_word_listener.py` | mikrofon, „Hey Jarvis”, nagrywanie, Whisper, wchodzenie w słowo |
-| `tts.py` | mowa zdanie po zdaniu |
-| `gui.py`, `hud.qml`, `hud.frag` | HUD na pełnym ekranie i ikona w zasobniku |
-| `setup_wizard.py`, `konfiguracja.py` | kreator, Ustawienia, skąd brać klucze |
-| `sciezki.py`, `modele.py` | gdzie leżą dane i modele, pobieranie modeli |
-| `spotify_controller.py`, `app_launcher.py`, `przegladarka.py`, `system_control.py` | muzyka, programy, strony, sterowanie komputerem |
-| `reminders.py`, `notes.py`, `kalendarz.py`, `email_monitor.py`, `briefing.py` | przypomnienia, notatki, kalendarz, poczta, briefing |
-| `pamiec.py`, `slownik.py`, `schowek.py`, `stan_komputera.py`, `czujniki.py` | pamięć, słownik nazw, schowek, stan komputera, odczyty HUD-a |
-| `telegram_bridge.py` | rozmowa przez Telegram |
-| `instalator/` | budowanie instalatora (PyInstaller, Inno Setup, sprawdzanie paczki) |
-| `chat.py`, `router.py` | starsza architektura (router + czat), zachowana, nieużywana |
+- **Windows only.** Speech recognition runs on the CPU, so expect a few seconds' delay.
+- **Interruptions** work best with headphones; use headphones mode only with headphones.
+- **Wallpaper mode** is tested on Windows 10; on Windows 11 24H2 it may fall back to a normal bottom-most window.
+- **Remote coding** works only in the source version, and Claude Code can't run tests there.
 
-## 📦 Budowanie instalatora
-
-```bash
-pip install pyinstaller
-```
-
-```bash
-winget install JRSoftware.InnoSetup
-```
-
-```bash
-python instalator/zbuduj.py
-```
-
-Skrypt robi po kolei: ikonę → paczkę PyInstallerem w trybie folderu (`dist/Jarvis/`) → **sprawdzenie prywatności** (czy w paczce nie ma `.env`, tokenów, pamięci, notatek, dziennika, modeli ani wartości Twoich kluczy — także w skompilowanym kodzie wewnątrz `Jarvis.exe`; jeśli coś znajdzie, przerywa) → **autotest** zbudowanego `Jarvis.exe` na czystym `%APPDATA%` → instalator Inno Setup (`dist/JarvisSetup.exe`). Zmieniłeś tylko `instalator/jarvis.iss`? Dodaj `--tylko-instalator`. Numer wersji jest w `wersja.py`.
-
-Modeli mowy nie ma w instalatorze (byłby pięć razy większy) — pobiera je kreator. Instalator nie jest podpisany, więc Windows pokazuje ostrzeżenie o nieznanym wydawcy, a Windows Defender bywa podejrzliwy wobec programów z PyInstallera; nową wersję warto zgłosić Microsoftowi jako twórca oprogramowania ([formularz](https://www.microsoft.com/en-us/wdsi/filesubmission) → *Software developer*).
-
-## ⚠️ Znane ograniczenia
-
-- Tylko **Windows** (polecenia systemowe, Opera GX, pywin32).
-- Rozpoznawanie mowy liczy na procesorze — od końca wypowiedzi do tekstu mija kilka sekund.
-- Wchodzenie w słowo najpewniej działa na słuchawkach; przy bardzo głośnych głośnikach Jarvis może Cię nie usłyszeć. Narzędzie w toku (np. szukanie w Spotify) kończy się przed przerwaniem.
-- Tryb słuchawek włączaj tylko na słuchawkach — przez głośniki Jarvis słyszałby sam siebie i milkł po pierwszych słowach. W tym trybie przerwać może też ktoś, kto mówi obok; Jarvis wtedy milknie, ale słucha dalej, więc wystarczy „mów dalej”.
-- Sterowanie Spotify wymaga konta **Premium**.
-- Temperatura procesora bez LibreHardwareMonitora jest niedostępna — HUD pokazuje wtedy temperaturę karty NVIDIA.
-
-## 🔭 Plany rozwoju
-
-- Podpisany instalator (bez ostrzeżeń Windows)
-- Whisper na karcie graficznej (szybsze rozpoznawanie)
-- Temperatura procesora przez LibreHardwareMonitor
-
-## 👤 Autor
+## 👤 Author
 
 Maciek — [GitHub](https://github.com/klosuj3bator)

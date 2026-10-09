@@ -31,7 +31,8 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 KOD = os.path.abspath(os.path.join(SPECPATH, ".."))
 
 # Części programu, których nie da się wyczytać z importów.
-datas = [(os.path.join(KOD, plik), ".") for plik in ("hud.qml", "hud.frag.qsb", "jarvis_icon.png")]
+datas = [(os.path.join(KOD, plik), ".")
+         for plik in ("hud.qml", "Panel.qml", "hud.frag.qsb", "jarvis_icon.png")]
 # Mały model wykrywania ciszy, który jest częścią BIBLIOTEKI faster-whisper
 # (vad_filter) — to nie jest model rozpoznawania mowy.
 datas += collect_data_files("faster_whisper")
