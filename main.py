@@ -75,6 +75,7 @@ import tapeta
 import zajetosc
 import zdalny_kod
 from logging_setup import PLIK_LOGU, skonfiguruj_logowanie
+from potwierdzenia import to_zgoda as _to_zgoda
 
 # tapeta i pasek_boczny są tu, na górze, a nie w środku main(): rozruch
 # importuje moduły w osobnych wątkach, a dwa wątki importujące naraz to
@@ -233,16 +234,8 @@ LIMIT_POTWIERDZENIA_S = 8
 
 # Brak odpowiedzi, cisza i hałas znaczą "nie". Tak samo każde słowo odmowy —
 # sprawdzamy je PIERWSZE, żeby "nie, nie rób tego" nie przeszło jako zgoda
-# tylko dlatego, że padło gdzieś słowo "dobra".
-SLOWA_ODMOWY = {
-    "nie", "anuluj", "anuluję", "anuluje", "przerwij", "stop", "zostaw",
-    "czekaj", "rezygnuję", "rezygnuje", "odwołaj", "odwolaj", "no",
-}
-SLOWA_ZGODY = {
-    "tak", "jasne", "pewnie", "potwierdzam", "zgoda", "zgadza", "dawaj",
-    "śmiało", "smialo", "rób", "rob", "zrób", "zrob", "wykonaj", "oczywiście",
-    "oczywiscie", "ok", "okej", "okay", "yes", "dobra", "dobrze",
-}
+# tylko dlatego, że padło gdzieś słowo "dobra". Listy słów i samo sprawdzenie
+# są w potwierdzenia.py — te same potwierdzają operacje na plikach (pliki.py).
 
 # Co Jarvis mówi tuż PRZED wykonaniem polecenia. Kolejność jest ważna:
 # po uśpieniu albo wyłączeniu nie byłoby już czym mówić.
@@ -254,23 +247,6 @@ ZAPOWIEDZI_SYSTEMOWE = {
 }
 
 ODMOWA = "Dobrze, zostawiam wszystko tak, jak jest."
-
-
-def _to_zgoda(tekst):
-    """
-    Czy w odpowiedzi padło wyraźne "tak"?
-
-    Porównujemy CAŁE słowa, a nie fragmenty — inaczej "nie" złapałoby się
-    w "niebo", a "ok" w "okno". Cisza (None) i hałas ("") to odmowa:
-    brak potwierdzenia nigdy nie może znaczyć zgody.
-    """
-    if not tekst:
-        return False
-
-    slowa = set(re.findall(r"[a-ząćęłńóśżź]+", tekst.lower()))
-    if slowa & SLOWA_ODMOWY:
-        return False
-    return bool(slowa & SLOWA_ZGODY)
 
 
 def _wykonaj_polecenie_systemowe(orb, polecenie):

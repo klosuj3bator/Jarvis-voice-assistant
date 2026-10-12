@@ -87,6 +87,15 @@ socket.socket.connect = _tylko_lokalnie(_polacz)
 socket.socket.connect_ex = _tylko_lokalnie(_polacz_ex)
 
 
+# --- 4. Żadnych okien: test nie otworzy Eksploratora ani programu --------
+def _bez_otwierania(*argumenty, **opcje):
+    raise RuntimeError("Testy nie otwierają okien ani plików (os.startfile) — użyj atrapy.")
+
+
+if hasattr(os, "startfile"):
+    os.startfile = _bez_otwierania
+
+
 # --- Przed każdym testem ------------------------------------------------
 @pytest.fixture(autouse=True)
 def czyste_dane():

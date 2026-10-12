@@ -48,6 +48,7 @@ Utrata strumienia oznaczałaby powrót do czekania w ciszy na całą odpowiedź.
 """
 
 import base64
+import itertools
 import json
 import logging
 import os
@@ -66,6 +67,7 @@ import kalendarz
 import konfiguracja
 import notes
 import pamiec
+import pliki
 import powitanie
 import przegladarka
 import reminders
@@ -439,7 +441,9 @@ NARZEDZIA = [
             "mleko' zostaje 'kupić mleko'. "
             "To NIE jest to samo co remember_fact — remember_fact służy do trwałych "
             "faktów o użytkowniku ('zapamiętaj, że…'), a notatki to zapiski "
-            "z konkretnego dnia."
+            "z konkretnego dnia. "
+            "I NIE create_file: gdy użytkownik mówi o PLIKU albo o MIEJSCU ('zrób na "
+            "pulpicie notatkę…', 'zapisz do pliku…'), powstaje osobny plik — create_file."
         ),
         "input_schema": {
             "type": "object",
@@ -484,6 +488,147 @@ NARZEDZIA = [
                         "description": "Ile fragmentów zwrócić (domyślnie 5, najwyżej 10)."},
             },
             "required": ["zapytanie"],
+        },
+    },
+    # --- Pliki (pliki.py): tylko w dozwolonych miejscach, bez usuwania ---
+    {
+        "name": "create_folder",
+        "description": (
+            "Tworzy folder: 'zrób folder Projekty na pulpicie'. Ścieżkę podawaj od "
+            "nazwy miejsca: 'Pulpit/Projekty', 'Dokumenty/Szkoła/Matematyka'. Wolno "
+            "tylko w dozwolonych miejscach (zwykle Pulpit i Dokumenty — pełną listę "
+            "daje list_files bez ścieżki)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"sciezka": {"type": "string", "description": "Np. 'Pulpit/Projekty'."}},
+            "required": ["sciezka"],
+        },
+    },
+    {
+        "name": "create_file",
+        "description": (
+            "Tworzy NOWY plik tekstowy z podaną treścią, gdy użytkownik mówi o PLIKU "
+            "albo o MIEJSCU: 'zrób na pulpicie notatkę zakupy z mlekiem i chlebem', "
+            "'zapisz to do pliku w dokumentach'. To NIE jest zanotuj — samo "
+            "'zanotuj…' trafia do dziennika notatek. Notatka albo lista -> .md "
+            "(np. 'Pulpit/zakupy.md' z treścią w punktach: '- mleko', '- chleb' "
+            "w osobnych liniach), zwykły tekst -> .txt. Istniejącego pliku nie "
+            "nadpisuje bez zgody — wtedy zwraca POTRZEBNE POTWIERDZENIE."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sciezka": {"type": "string", "description": "Np. 'Pulpit/zakupy.md' (.txt albo .md)."},
+                "tresc": {"type": "string", "description": "Cała treść pliku."},
+            },
+            "required": ["sciezka", "tresc"],
+        },
+    },
+    {
+        "name": "list_files",
+        "description": (
+            "Pokazuje, co jest w folderze: nazwy folderów i plików, rozmiary, daty "
+            "(bez treści plików). Bez ścieżki — lista dozwolonych miejsc. Usuwania "
+            "plików Jarvis nie ma; gdy użytkownik o nie prosi, powiedz to wprost."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"sciezka": {"type": "string", "description": "Np. 'Pulpit' albo 'Dokumenty/Faktury'."}},
+        },
+    },
+    {
+        "name": "open_folder",
+        "description": "Otwiera folder w Eksploratorze Windows. Tylko foldery — plików nie otwiera.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"sciezka": {"type": "string", "description": "Np. 'Pulpit/Projekty'."}},
+            "required": ["sciezka"],
+        },
+    },
+    {
+        "name": "append_to_file",
+        "description": (
+            "Dopisuje tekst na końcu ISTNIEJĄCEGO pliku .txt albo .md: 'dopisz do "
+            "listy zakupów jajka'. Dopasuj formę do pliku — na liście z myślnikami "
+            "dopisz '- jajka'. Gdy nie wiesz, jak plik się nazywa, sprawdź list_files."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sciezka": {"type": "string", "description": "Np. 'Pulpit/zakupy.md'."},
+                "tekst": {"type": "string", "description": "Co dopisać (jedna albo kilka linii)."},
+            },
+            "required": ["sciezka", "tekst"],
+        },
+    },
+    {
+        "name": "edit_file",
+        "description": (
+            "Zmienia treść pliku .txt albo .md: każde wystąpienie stary_tekst (wielkość "
+            "liter bez znaczenia) zamienia na nowy_tekst — 'w liście zamień mleko na "
+            "sok'; usunięcie pozycji to pusty nowy_tekst. NIGDY nie zapisuje od razu: "
+            "zwraca podgląd zmian i POTRZEBNE POTWIERDZENIE — powiedz użytkownikowi, "
+            "co się zmieni, i zapytaj."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sciezka": {"type": "string", "description": "Np. 'Pulpit/zakupy.md'."},
+                "stary_tekst": {"type": "string", "description": "Fragment do zmiany, np. 'mleko'."},
+                "nowy_tekst": {"type": "string", "description": "Czym go zastąpić, np. 'sok'."},
+            },
+            "required": ["sciezka", "stary_tekst", "nowy_tekst"],
+        },
+    },
+    {
+        "name": "move_files",
+        "description": (
+            "Przenosi pliki (nie foldery) do folderu; brakujący folder docelowy tworzy. "
+            "'Stwórz folder Faktury i wrzuć tam wszystkie PDF-y z pulpitu' -> pliki "
+            "['Pulpit/*.pdf'], cel 'Pulpit/Faktury'. Wzorce: * i ?. Gdy plików jest "
+            "więcej niż 5 albo w celu są już pliki o tych nazwach, nic nie robi, tylko "
+            "zwraca ich listę i POTRZEBNE POTWIERDZENIE."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pliki": {"type": "array", "items": {"type": "string"},
+                          "description": "Ścieżki albo wzorce, np. ['Pulpit/*.pdf', 'Pulpit/umowa.docx']."},
+                "cel": {"type": "string", "description": "Folder docelowy, np. 'Pulpit/Faktury'."},
+            },
+            "required": ["pliki", "cel"],
+        },
+    },
+    {
+        "name": "copy_files",
+        "description": (
+            "Kopiuje pliki (nie foldery) do folderu — oryginały zostają. Zasady jak "
+            "w move_files, także potwierdzenie przy więcej niż 5 plikach albo "
+            "plikach o tych samych nazwach w celu."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pliki": {"type": "array", "items": {"type": "string"},
+                          "description": "Ścieżki albo wzorce, np. ['Dokumenty/*.pdf']."},
+                "cel": {"type": "string", "description": "Folder docelowy, np. 'Pulpit/Kopie'."},
+            },
+            "required": ["pliki", "cel"],
+        },
+    },
+    {
+        "name": "confirm_file_operation",
+        "description": (
+            "Wykonuje operację na plikach, która czeka na zgodę (POTRZEBNE POTWIERDZENIE "
+            "z kodem). Wołaj TYLKO w wypowiedzi, w której użytkownik odpowiedział na "
+            "Twoje pytanie — z jego 'tak' wykona, z 'nie' anuluje. Nigdy w tej samej "
+            "wypowiedzi, w której operacja powstała."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"kod": {"type": "string", "description": "Kod z POTRZEBNE POTWIERDZENIE."}},
+            "required": ["kod"],
         },
     },
     {
@@ -1522,6 +1667,9 @@ def _tnij_na_zdania(bufor):
 
 _klient = None
 
+# Numer każdej wypowiedzi — operacje na plikach wymagają zgody w KOLEJNEJ (pliki.py).
+_numery_wypowiedzi = itertools.count(1)
+
 
 def _anthropic():
     """
@@ -1679,6 +1827,7 @@ def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, prz
     global _klient
 
     historia = _przytnij_historie(list(historia) if historia else [])
+    id_wypowiedzi = next(_numery_wypowiedzi)
 
     if not tekst_uzytkownika or not tekst_uzytkownika.strip():
         yield "Nie dosłyszałem."
@@ -1946,6 +2095,10 @@ def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, prz
             elif wywolanie.name == "analyze_screen":
                 # Tu "komunikat" to lista bloków: obraz + tekst, a nie zwykły napis.
                 komunikat, sukces = _obraz_ekranu(wywolanie.input)
+            elif wywolanie.name in pliki.NARZEDZIA_PLIKOW:
+                # Twoja wypowiedź i jej numer — do potwierdzeń (opis w pliki.py).
+                komunikat, sukces = pliki.wykonaj(wywolanie.name, wywolanie.input,
+                                                  tekst_uzytkownika, id_wypowiedzi)
             else:
                 komunikat, sukces = _wykonaj_narzedzie(wywolanie.name, wywolanie.input)
 

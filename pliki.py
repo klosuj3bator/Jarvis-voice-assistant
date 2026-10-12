@@ -1,0 +1,609 @@
+"""
+pliki.py — praca z plikami na Twoje polecenie.
+
+    create_folder    "zrób folder Projekty na pulpicie"
+    create_file      "zrób na pulpicie notatkę zakupy z mlekiem i chlebem"
+    list_files       "co mam na pulpicie?"
+    open_folder      "otwórz folder Projekty"
+    append_to_file   "dopisz do listy zakupów jajka"
+    edit_file        "w liście zamień mleko na sok"
+    move_files       "stwórz folder Faktury i wrzuć tam wszystkie PDF-y z pulpitu"
+    copy_files       to samo, ale oryginały zostają
+
+To NIE są notatki. "Zanotuj…" dalej trafia do dziennika notatek (notes.py);
+tutaj powstają osobne pliki — gdy mówisz o pliku albo o miejscu ("na pulpicie").
+
+
+GDZIE WOLNO
+===========
+
+Tylko w dozwolonych miejscach: domyślnie Pulpit i Dokumenty (gdzie naprawdę
+leżą, pytamy Windows — bywają przeniesione do OneDrive) albo foldery
+z JARVIS_DOZWOLONE_FOLDERY w .env, rozdzielone średnikiem. Model podaje
+ścieżkę od nazwy miejsca: "Pulpit/Projekty/plan.md". Odrzucamy:
+
+  - ".." w ścieżce — nawet gdyby wynik wypadał w środku; prościej i pewniej,
+  - wszystko poza dozwolonymi miejscami, także przez skróty i dowiązania
+    (porównujemy prawdziwe położenie, os.path.realpath),
+  - folder Jarvisa i jego dane — leży na Pulpicie, a model nie może
+    zmieniać własnego kodu ani .env z kluczami,
+  - ukryte foldery i pliki (z kropką na początku: .git, .obsidian),
+  - nazwy zastrzeżone w Windows (CON, NUL, COM1…) i niedozwolone znaki.
+
+Tworzyć, dopisywać i zmieniać wolno tylko pliki .txt i .md. Przenosić
+i kopiować — dowolne pliki (np. PDF-y), ale same pliki, nie całe foldery.
+Folder otwieramy w Eksploratorze; pliku nie otwieramy nigdy — "otwarcie"
+programu to jego uruchomienie.
+
+
+CZEGO NIE MA
+============
+
+Usuwania. Żadne narzędzie nie kasuje plików ani folderów.
+
+Czytania. Model nie dostaje treści plików — widzi tylko nazwy (list_files)
+i przy edit_file same zmieniane linie. Plików z kluczami Jarvisa ani linii
+wyglądających na hasło edit_file nie pokazuje i nie zmienia.
+
+
+POTWIERDZENIA
+=============
+
+Część operacji czeka na Twoją zgodę:
+
+  - nadpisanie istniejącego pliku (create_file, a przy przenoszeniu
+    i kopiowaniu — plik o tej samej nazwie w folderze docelowym),
+  - każda zmiana treści (edit_file) — najpierw podgląd, co się zmieni,
+  - przeniesienie albo skopiowanie więcej niż PROG_ZGODY plików — najpierw lista.
+
+Wtedy narzędzie niczego nie robi: zwraca opis i kod, a model pyta Cię
+o zgodę. Dopiero gdy w NASTĘPNEJ wypowiedzi powiesz "tak", model woła
+confirm_file_operation z tym kodem. Kod pilnuje, żeby model nie
+"potwierdził sam sobie":
+
+  - potwierdzenie musi przyjść w innej wypowiedzi niż propozycja,
+  - w tej wypowiedzi musi paść wyraźna zgoda ("tak", "potwierdzam"),
+    bez "nie" (potwierdzenia.py — te same słowa co przy restarcie komputera),
+  - propozycja wygasa po WAZNOSC_S, a naraz czeka tylko jedna.
+
+Mail tego nie obejdzie: po odczycie poczty agent blokuje wszystkie
+narzędzia do końca wypowiedzi (agent.py, BLOKADA_PO_POCZCIE), a do
+potwierdzenia potrzeba Twojego "tak" w kolejnej wypowiedzi.
+"""
+
+import ctypes
+import glob
+import hashlib
+import logging
+import os
+import re
+import shutil
+import threading
+import time
+import unicodedata
+import uuid
+from dataclasses import dataclass, field
+
+import akcje
+import konfiguracja
+import pamiec
+import sciezki
+from potwierdzenia import to_odmowa, to_zgoda
+
+logger = logging.getLogger(__name__)
+
+ZMIENNA_MIEJSC = "JARVIS_DOZWOLONE_FOLDERY"
+ROZSZERZENIA_TEKSTU = (".txt", ".md")
+PROG_ZGODY = 5                       # "więcej niż kilka plików" — powyżej pytamy o zgodę
+WAZNOSC_S = 5 * 60                   # tyle czeka propozycja na Twoje "tak"
+MAKS_TRESC = 100_000                 # znaków w tworzonym pliku
+MAKS_PLIK_DO_ZMIANY = 1_000_000      # większych plików nie zmieniamy (to nie są notatki)
+MAKS_POZYCJI = 60                    # tyle pozycji pokazuje list_files
+MAKS_W_PODGLADZIE = 20               # tyle plików albo zmienionych linii wymieniamy z nazwy
+
+# Tym zaczyna się wynik narzędzia, które czeka na zgodę (agent.py go rozpoznaje).
+POTRZEBNE_POTWIERDZENIE = "POTRZEBNE POTWIERDZENIE"
+
+_ZASTRZEZONE = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)),
+                *(f"lpt{i}" for i in range(1, 10))}
+_NIEDOZWOLONE_ZNAKI = re.compile(r'[<>:"|?*\x00-\x1f]')
+
+# Znane foldery Windows (SHGetKnownFolderPath) — Pulpit i Dokumenty.
+_PULPIT = "B4BFCC3A-DB2C-424C-B029-7FE99A87C641"
+_DOKUMENTY = "FDD39AD0-238F-46AF-ADB4-6C85480369C7"
+
+
+class BladSciezki(Exception):
+    """Ścieżka niedozwolona albo błędna — komunikat dla modelu i dla Ciebie."""
+
+
+# ---------------------------------------------------------------
+# Dozwolone miejsca i sprawdzanie ścieżek
+# ---------------------------------------------------------------
+
+def _znany_folder(guid, zapasowy):
+    """Prawdziwe położenie Pulpitu albo Dokumentów (także po przeniesieniu do OneDrive)."""
+    try:
+        import uuid as _uuid
+
+        identyfikator = (ctypes.c_char * 16).from_buffer_copy(_uuid.UUID(guid).bytes_le)
+        wynik = ctypes.c_wchar_p()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(identyfikator), 0, None,
+                                                      ctypes.byref(wynik)) == 0:
+            sciezka = wynik.value
+            ctypes.windll.ole32.CoTaskMemFree(wynik)
+            if sciezka:
+                return sciezka
+    except (AttributeError, OSError, ValueError):
+        pass                                # nie Windows albo brak API — zwykła ścieżka
+    return os.path.join(os.path.expanduser("~"), zapasowy)
+
+
+def _normuj(tekst):
+    """"Pulpit" == "pulpit" == "PULPIT"; bez polskich znaków."""
+    tekst = unicodedata.normalize("NFKD", tekst.lower().replace("ł", "l"))
+    return tekst.encode("ascii", "ignore").decode().strip()
+
+
+def _klucz(sciezka):
+    return os.path.normcase(os.path.realpath(sciezka))
+
+
+def _w_srodku(sciezka, folder):
+    """Czy sciezka leży w folderze (albo jest nim) — po prawdziwym położeniu."""
+    sciezka, folder = _klucz(sciezka), _klucz(folder)
+    try:
+        return os.path.commonpath([sciezka, folder]) == folder
+    except ValueError:                      # różne dyski
+        return False
+
+
+def miejsca():
+    """
+    Dozwolone miejsca: [(nazwa, pełna ścieżka, nazwy, po których model może
+    je wskazać)]. Liczone przy każdym użyciu — zmiana .env działa od razu.
+    """
+    pulpit = _znany_folder(_PULPIT, "Desktop")
+    dokumenty = _znany_folder(_DOKUMENTY, "Documents")
+    znane = {_klucz(pulpit): ("Pulpit", {"pulpit", "desktop"}),
+             _klucz(dokumenty): ("Dokumenty", {"dokumenty", "documents", "moje dokumenty"})}
+
+    wpisane = [s.strip().strip('"') for s in os.getenv(ZMIENNA_MIEJSC, "").split(";") if s.strip()]
+    foldery = [os.path.expandvars(os.path.expanduser(s)) for s in wpisane] or [pulpit, dokumenty]
+    wynik = []
+    for folder in foldery:
+        if not os.path.isdir(folder):
+            logger.warning("[PLIKI] %s: folder %r nie istnieje — pomijam.", ZMIENNA_MIEJSC, folder)
+            continue
+        nazwa, nazwy = znane.get(_klucz(folder), (os.path.basename(os.path.normpath(folder)), set()))
+        wynik.append((nazwa, os.path.realpath(folder), nazwy | {_normuj(nazwa)}))
+    return wynik
+
+
+def _chronione():
+    """Folder Jarvisa i jego dane — nawet gdy leżą w dozwolonym miejscu."""
+    return {os.path.realpath(p) for p in (sciezki.KOD, sciezki.DANE, sciezki.UZYTKOWNIK)}
+
+
+def _sprawdz_nazwe(nazwa):
+    if nazwa.startswith("."):
+        raise BladSciezki(f"„{nazwa}” to ukryty plik albo folder — tych nie ruszam.")
+    if _NIEDOZWOLONE_ZNAKI.search(nazwa) or nazwa.endswith((" ", ".")):
+        raise BladSciezki(f"„{nazwa}” zawiera znaki niedozwolone w nazwach plików.")
+    if nazwa.split(".")[0].lower() in _ZASTRZEZONE:
+        raise BladSciezki(f"„{nazwa}” to nazwa zastrzeżona w Windows.")
+
+
+def rozwiaz(sciezka):
+    """
+    Ścieżka od modelu -> (pełna ścieżka, opis do komunikatów, np. "Pulpit/Projekty").
+    Rzuca BladSciezki, gdy ścieżka jest niedozwolona (opis na górze modułu).
+    """
+    sciezka = (sciezka or "").strip().strip('"').strip()
+    if not sciezka:
+        raise BladSciezki("Podaj ścieżkę, np. Pulpit/Projekty.")
+    czesci = [c for c in re.split(r"[\\/]+", sciezka) if c not in ("", ".")]
+    if ".." in czesci:
+        raise BladSciezki("Ścieżek z „..” nie przyjmuję — podaj ją od nazwy miejsca, np. Pulpit/Projekty.")
+    dozwolone = miejsca()
+    if not dozwolone:
+        raise BladSciezki(f"Nie ma żadnego dozwolonego miejsca — sprawdź {ZMIENNA_MIEJSC} w .env.")
+
+    if sciezka.startswith(("\\\\", "//")) or re.match(r"^[A-Za-z]:", sciezka):
+        # Pełna ścieżka (C:\...) — wolno, jeśli leży w którymś z dozwolonych miejsc.
+        if not re.match(r"^[A-Za-z]:[\\/]", sciezka):
+            raise BladSciezki("Podaj pełną ścieżkę albo ścieżkę od nazwy miejsca, np. Pulpit/Projekty.")
+        pelna = os.path.realpath(sciezka)
+        miejsce = next((m for m in dozwolone if _w_srodku(pelna, m[1])), None)
+        if miejsce is None:
+            raise BladSciezki(f"{sciezka} leży poza dozwolonymi miejscami ({_lista_miejsc(dozwolone)}).")
+        wzgledna = os.path.relpath(pelna, miejsce[1])
+        czesci_wzgledne = [] if wzgledna == "." else wzgledna.split(os.sep)
+    else:
+        miejsce = next((m for m in dozwolone if _normuj(czesci[0]) in m[2]), None)
+        if miejsce is None:
+            raise BladSciezki(f"Nie znam miejsca „{czesci[0]}”. Wolno mi działać tylko tu: "
+                              f"{_lista_miejsc(dozwolone)}.")
+        czesci_wzgledne = czesci[1:]
+        pelna = os.path.realpath(os.path.join(miejsce[1], *czesci_wzgledne))
+
+    for nazwa in czesci_wzgledne:
+        _sprawdz_nazwe(nazwa)
+    # Prawdziwe położenie jeszcze raz: skrót albo dowiązanie mogłoby wyprowadzić poza miejsce.
+    if not _w_srodku(pelna, miejsce[1]):
+        raise BladSciezki("Ta ścieżka prowadzi poza dozwolone miejsce.")
+    if any(_w_srodku(pelna, chroniony) for chroniony in _chronione()):
+        raise BladSciezki("To folder Jarvisa albo jego dane — własnych plików nie ruszam.")
+    return pelna, "/".join([miejsce[0], *czesci_wzgledne])
+
+
+def _lista_miejsc(dozwolone=None):
+    return ", ".join(nazwa for nazwa, _, _ in (dozwolone if dozwolone is not None else miejsca()))
+
+
+def _plik_tekstowy(pelna, opis):
+    if os.path.splitext(pelna)[1].lower() not in ROZSZERZENIA_TEKSTU:
+        raise BladSciezki(f"{opis}: pracuję tylko na plikach tekstowych .txt i .md.")
+
+
+# ---------------------------------------------------------------
+# Czekające na zgodę
+# ---------------------------------------------------------------
+
+@dataclass
+class _Operacja:
+    kod: str
+    id_wypowiedzi: int
+    wykonaj: object                       # funkcja bez argumentów -> (komunikat, ok)
+    kiedy: float = field(default_factory=time.monotonic)
+
+
+_oczekujaca = None
+_blokada = threading.Lock()
+
+
+def _zaproponuj(opis, wykonaj, id_wypowiedzi):
+    """Zapamiętuje operację do potwierdzenia i mówi modelowi, co ma zrobić."""
+    global _oczekujaca
+    kod = uuid.uuid4().hex[:6]
+    with _blokada:
+        _oczekujaca = _Operacja(kod, id_wypowiedzi, wykonaj)
+    return (f"{POTRZEBNE_POTWIERDZENIE} (kod {kod}). NICZEGO JESZCZE NIE ZROBIŁEM.\n{opis}\n"
+            "Powiedz to użytkownikowi krótko i zapytaj, czy wykonać. Jeśli w następnej "
+            f"wypowiedzi wyraźnie się zgodzi, wywołaj confirm_file_operation z kodem {kod}. "
+            "Nie potwierdzaj sam."), True
+
+
+def potwierdz(kod, tekst_uzytkownika, id_wypowiedzi):
+    """confirm_file_operation — tylko z wyraźnym "tak" w kolejnej wypowiedzi."""
+    global _oczekujaca
+    with _blokada:
+        operacja = _oczekujaca
+        if operacja is None or operacja.kod != (kod or "").strip():
+            return ("Nie ma operacji o tym kodzie, która czeka na potwierdzenie (mogła wygasnąć "
+                    "albo została zastąpiona nową). Jeśli trzeba, zaproponuj ją jeszcze raz."), False
+        if time.monotonic() - operacja.kiedy > WAZNOSC_S:
+            _oczekujaca = None
+            return "Propozycja wygasła — zaproponuj ją jeszcze raz i zapytaj o zgodę.", False
+        if operacja.id_wypowiedzi == id_wypowiedzi:
+            return ("NIE WYKONANO: zgodę musi dać użytkownik w swojej kolejnej wypowiedzi. "
+                    "Najpierw go zapytaj."), False
+        if to_odmowa(tekst_uzytkownika):
+            _oczekujaca = None
+            return "Użytkownik się nie zgodził — operację anulowałem, nic nie zmieniłem.", True
+        if not to_zgoda(tekst_uzytkownika):
+            return ("NIE WYKONANO: w ostatniej wypowiedzi użytkownika nie ma wyraźnej zgody "
+                    "(„tak”, „potwierdzam”). Zapytaj jeszcze raz."), False
+        _oczekujaca = None
+    logger.info("[PLIKI] Potwierdzona operacja %s.", operacja.kod)
+    return operacja.wykonaj()
+
+
+# ---------------------------------------------------------------
+# Operacje
+# ---------------------------------------------------------------
+
+def _zapisz_cale(pelna, tresc):
+    """Zapis przez plik tymczasowy — przerwany zapis nie zostawi pół pliku."""
+    tymczasowy = pelna + ".jarvis-tmp"
+    with open(tymczasowy, "w", encoding="utf-8", newline="") as plik:
+        plik.write(tresc)
+    os.replace(tymczasowy, pelna)
+
+
+def _czytaj(pelna):
+    if os.path.getsize(pelna) > MAKS_PLIK_DO_ZMIANY:
+        raise BladSciezki("Ten plik jest za duży, żebym go zmieniał.")
+    with open(pelna, encoding="utf-8", errors="replace", newline="") as plik:
+        return plik.read()
+
+
+def _z_koncem_linii(tekst, nowa_linia="\n"):
+    tekst = tekst.replace("\r\n", "\n").replace("\n", nowa_linia)
+    return tekst if tekst.endswith(nowa_linia) else tekst + nowa_linia
+
+
+def utworz_folder(sciezka):
+    pelna, opis = rozwiaz(sciezka)
+    if os.path.isdir(pelna):
+        return f"Folder {opis} już jest — nic nie zmieniłem.", True
+    if os.path.exists(pelna):
+        return f"{opis} to plik, nie folder.", False
+    os.makedirs(pelna)
+    akcje.zapisz("Nowy folder")
+    logger.info("[PLIKI] Nowy folder: %s", opis)
+    return f"Utworzyłem folder {opis}.", True
+
+
+def utworz_plik(sciezka, tresc, id_wypowiedzi):
+    if not os.path.splitext(sciezka or "")[1]:
+        sciezka = f"{sciezka}.txt"              # bez rozszerzenia — zwykły plik tekstowy
+    pelna, opis = rozwiaz(sciezka)
+    _plik_tekstowy(pelna, opis)
+    tresc = tresc or ""
+    if len(tresc) > MAKS_TRESC:
+        return f"Za długa treść ({len(tresc)} znaków, limit {MAKS_TRESC}).", False
+    if os.path.isdir(pelna):
+        return f"{opis} to folder — podaj nazwę pliku.", False
+
+    def zapisz(nadpisz):
+        os.makedirs(os.path.dirname(pelna), exist_ok=True)
+        if nadpisz:
+            _zapisz_cale(pelna, _z_koncem_linii(tresc))
+        else:
+            # "x" = tylko nowy plik; gdyby w międzyczasie ktoś go utworzył — błąd, nie nadpisanie.
+            with open(pelna, "x", encoding="utf-8", newline="") as plik:
+                plik.write(_z_koncem_linii(tresc))
+        akcje.zapisz("Nadpisałem plik" if nadpisz else "Nowy plik")
+        logger.info("[PLIKI] %s: %s", "Nadpisany" if nadpisz else "Nowy plik", opis)
+        return f"{'Nadpisałem' if nadpisz else 'Utworzyłem'} plik {opis}.", True
+
+    if os.path.exists(pelna):
+        return _zaproponuj(f"Plik {opis} już istnieje. Nadpisanie zastąpi całą jego treść nową.",
+                           lambda: zapisz(nadpisz=True), id_wypowiedzi)
+    return zapisz(nadpisz=False)
+
+
+def lista(sciezka=None):
+    if not (sciezka or "").strip():
+        return ("Dozwolone miejsca: " + "; ".join(f"{n} ({p})" for n, p, _ in miejsca())
+                + ". Podaj jedno z nich, żeby zobaczyć zawartość."), True
+    pelna, opis = rozwiaz(sciezka)
+    if not os.path.isdir(pelna):
+        return f"Nie ma folderu {opis}.", False
+    chronione = _chronione()
+    foldery, pliki_ = [], []
+    for wpis in sorted(os.scandir(pelna), key=lambda w: w.name.lower()):
+        if wpis.name.startswith(".") or any(_w_srodku(wpis.path, c) for c in chronione):
+            continue
+        if wpis.is_dir():
+            foldery.append(f"📁 {wpis.name}/")
+        else:
+            stan = wpis.stat()
+            kiedy = time.strftime("%d.%m.%Y", time.localtime(stan.st_mtime))
+            pliki_.append(f"{wpis.name} ({_rozmiar(stan.st_size)}, {kiedy})")
+    pozycje = foldery + pliki_
+    akcje.zapisz("Lista plików")
+    if not pozycje:
+        return f"Folder {opis} jest pusty.", True
+    pokazane = pozycje[:MAKS_POZYCJI]
+    reszta = f"\n…i {len(pozycje) - len(pokazane)} innych" if len(pozycje) > len(pokazane) else ""
+    return (f"{opis}: {_ile(len(foldery), 'folder', 'foldery', 'folderów')}, "
+            f"{_ile(len(pliki_), 'plik', 'pliki', 'plików')}:\n" + "\n".join(pokazane) + reszta), True
+
+
+def _ile(liczba, jeden, kilka, wiele):
+    """Polska odmiana: 1 plik, 2 pliki, 5 plików, 22 pliki, 12 plików."""
+    if liczba == 1:
+        return f"1 {jeden}"
+    if liczba % 10 in (2, 3, 4) and liczba % 100 not in (12, 13, 14):
+        return f"{liczba} {kilka}"
+    return f"{liczba} {wiele}"
+
+
+def _rozmiar(bajty):
+    for jednostka in ("B", "KB", "MB", "GB"):
+        if bajty < 1024 or jednostka == "GB":
+            return f"{bajty:.0f} {jednostka}" if jednostka == "B" else f"{bajty:.1f} {jednostka}"
+        bajty /= 1024
+
+
+def _otworz(pelna):
+    os.startfile(pelna)                      # folder -> Eksplorator
+
+
+def otworz_folder(sciezka):
+    pelna, opis = rozwiaz(sciezka)
+    if not os.path.isdir(pelna):
+        # Plików celowo nie otwieramy: "otwarcie" programu to jego uruchomienie.
+        return f"{opis} to nie folder — otwieram tylko foldery.", False
+    _otworz(pelna)
+    akcje.zapisz("Otworzyłem folder")
+    return f"Otworzyłem {opis} w Eksploratorze.", True
+
+
+def dopisz(sciezka, tekst):
+    pelna, opis = rozwiaz(sciezka)
+    _plik_tekstowy(pelna, opis)
+    if not os.path.isfile(pelna):
+        return f"Nie ma pliku {opis}. Jeśli ma powstać, użyj create_file.", False
+    tekst = (tekst or "").strip("\n")
+    if not tekst.strip():
+        return "Nie ma czego dopisać.", False
+    tresc = _czytaj(pelna)
+    nowa_linia = "\r\n" if "\r\n" in tresc else "\n"
+    poczatek = nowa_linia if tresc and not tresc.endswith(("\n", "\r")) else ""
+    with open(pelna, "a", encoding="utf-8", newline="") as plik:
+        plik.write(poczatek + _z_koncem_linii(tekst, nowa_linia))
+    akcje.zapisz("Dopisałem do pliku")
+    logger.info("[PLIKI] Dopisane do %s", opis)
+    return f"Dopisałem do {opis}.", True
+
+
+def zmien(sciezka, stary, nowy, id_wypowiedzi):
+    pelna, opis = rozwiaz(sciezka)
+    _plik_tekstowy(pelna, opis)
+    if not os.path.isfile(pelna):
+        return f"Nie ma pliku {opis}.", False
+    if not (stary or "").strip():
+        return "Podaj, jaki fragment zmienić.", False
+    tresc = _czytaj(pelna)
+    # Treści plików modelowi NIE pokazujemy (poza podglądem samych zmienianych
+    # linii). Model nie ma narzędzia do czytania plików — i dobrze: podsunięte
+    # mu polecenie (np. z notatki) nie wyciągnie z dysku czyjegoś klucza.
+    if any(wartosc in tresc for wartosc in konfiguracja.tajne_wartosci().values()):
+        return f"{opis} zawiera klucz Jarvisa — tego pliku nie zmieniam.", False
+    wzorzec = re.compile(re.escape(stary), re.IGNORECASE)     # "Mleko" też pasuje do "mleko"
+    trafienia = len(wzorzec.findall(tresc))
+    if not trafienia:
+        return (f"W {opis} nie ma fragmentu „{stary}” (wielkość liter bez znaczenia). "
+                "Zapytaj użytkownika, jak dokładnie brzmi to, co chce zmienić."), False
+    nowa_tresc = wzorzec.sub(lambda _: nowy or "", tresc)
+    skrot = hashlib.sha1(tresc.encode("utf-8")).hexdigest()
+
+    # Podgląd: zmienione linie przed i po.
+    przed, po = tresc.splitlines(), nowa_tresc.splitlines()
+    zmiany = [(s, n) for s, n in zip(przed, po) if s != n]
+    if len(przed) != len(po):                 # zmiana dodała albo usunęła linie
+        zmiany = [("\n".join(przed), "\n".join(po))] if len(tresc) < 2000 else zmiany
+    if any(pamiec.wyglada_na_sekret(linia) for para in zmiany for linia in para):
+        return (f"Zmieniane linie w {opis} wyglądają na hasło, klucz albo kod — takich nie "
+                "pokazuję ani nie zmieniam. Użytkownik może to zrobić sam."), False
+    podglad = "\n".join(f"  było: {s}\n  będzie: {n}" for s, n in zmiany[:MAKS_W_PODGLADZIE])
+    if len(zmiany) > MAKS_W_PODGLADZIE:
+        podglad += f"\n  …i {len(zmiany) - MAKS_W_PODGLADZIE} innych linii"
+
+    def zapisz():
+        if hashlib.sha1(_czytaj(pelna).encode("utf-8")).hexdigest() != skrot:
+            return ("Plik zmienił się od podglądu — nie zapisuję. Zaproponuj zmianę jeszcze "
+                    "raz, na aktualnej treści."), False
+        _zapisz_cale(pelna, nowa_tresc)
+        akcje.zapisz("Zmieniłem plik")
+        logger.info("[PLIKI] Zmieniony plik %s (%d miejsc).", opis, trafienia)
+        return f"Zapisałem zmiany w {opis} ({trafienia} {'miejsce' if trafienia == 1 else 'miejsca'}).", True
+
+    return _zaproponuj(f"Zmiana w {opis} — {trafienia}× „{stary}” → „{nowy or ''}”:\n{podglad}",
+                       zapisz, id_wypowiedzi)
+
+
+def _wybierz_pliki(wzorce):
+    """Lista ścieżek albo wzorców ("Pulpit/*.pdf") -> pełne ścieżki samych plików."""
+    if isinstance(wzorce, str):
+        wzorce = [wzorce]
+    wybrane = {}
+    for wzorzec in wzorce or []:
+        folder, nazwa = os.path.split(re.sub(r"[\\/]+", "/", (wzorzec or "").strip()))
+        if any(znak in nazwa for znak in "*?["):
+            pelny_folder, opis_folderu = rozwiaz(folder)
+            if not os.path.isdir(pelny_folder):
+                raise BladSciezki(f"Nie ma folderu {opis_folderu}.")
+            for sciezka in sorted(glob.glob(os.path.join(glob.escape(pelny_folder), nazwa))):
+                if os.path.isfile(sciezka) and not os.path.basename(sciezka).startswith("."):
+                    pelna, _ = rozwiaz(sciezka)            # ta sama kontrola dla każdego pliku
+                    wybrane[_klucz(pelna)] = pelna
+        else:
+            pelna, opis = rozwiaz(wzorzec)
+            if os.path.isdir(pelna):
+                raise BladSciezki(f"{opis} to folder — przenoszę i kopiuję tylko pliki "
+                                  "(np. „{opis}/*” to wszystkie pliki z niego).")
+            if not os.path.isfile(pelna):
+                raise BladSciezki(f"Nie ma pliku {opis}.")
+            wybrane[_klucz(pelna)] = pelna
+    return list(wybrane.values())
+
+
+def przenies(wzorce, cel, id_wypowiedzi, kopiuj=False):
+    """move_files / copy_files. Folder docelowy powstaje, jeśli go nie ma."""
+    czynnosc = ("skopiować", "Skopiowałem", "Skopiowane") if kopiuj else ("przenieść", "Przeniosłem", "Przeniesione")
+    pelny_cel, opis_celu = rozwiaz(cel)
+    if os.path.isfile(pelny_cel):
+        return f"{opis_celu} to plik — podaj folder docelowy.", False
+    zrodla = _wybierz_pliki(wzorce)
+    plan = [(z, os.path.join(pelny_cel, os.path.basename(z))) for z in zrodla
+            if _klucz(os.path.dirname(z)) != _klucz(pelny_cel)]          # już tam leży — pomijamy
+    if not plan:
+        return f"Nie ma plików do {czynnosc[0]} (nic nie pasuje albo już są w {opis_celu}).", True
+    nazwy = [os.path.basename(z) for z, _ in plan]
+    powtorzone = sorted({n for n in nazwy if nazwy.count(n) > 1})
+    if powtorzone:
+        return (f"Kilka plików ma tę samą nazwę ({', '.join(powtorzone)}) — w jednym folderze "
+                "nie zmieszczą się obok siebie. Wybierz je dokładniej."), False
+    istniejace = [d for _, d in plan if os.path.exists(d)]
+
+    def zrob():
+        os.makedirs(pelny_cel, exist_ok=True)
+        zrobione, pominiete = 0, []
+        for zrodlo, docelowy in plan:
+            if not os.path.isfile(zrodlo):
+                pominiete.append(f"{os.path.basename(zrodlo)} (zniknął)")
+                continue
+            # Nadpisujemy tylko to, co było na liście w chwili Twojej zgody.
+            if os.path.exists(docelowy) and docelowy not in istniejace:
+                pominiete.append(f"{os.path.basename(zrodlo)} (w międzyczasie pojawił się taki w celu)")
+                continue
+            if kopiuj:
+                shutil.copy2(zrodlo, docelowy)
+            elif os.path.exists(docelowy):
+                shutil.copy2(zrodlo, docelowy)      # nadpisanie potwierdzone
+                os.remove(zrodlo)                    # to wciąż przeniesienie: oryginał trafił do celu
+            else:
+                shutil.move(zrodlo, docelowy)
+            zrobione += 1
+        akcje.zapisz(f"{czynnosc[2]} pliki ({zrobione})")
+        logger.info("[PLIKI] %s %d plików do %s.", czynnosc[2], zrobione, opis_celu)
+        komunikat = f"{czynnosc[1]} {_ile(zrobione, 'plik', 'pliki', 'plików')} do {opis_celu}."
+        if pominiete:
+            komunikat += " Pominięte: " + ", ".join(pominiete) + "."
+        return komunikat, True
+
+    if len(plan) > PROG_ZGODY or istniejace:
+        lista_ = "\n".join(f"  - {n}" for n in nazwy[:MAKS_W_PODGLADZIE])
+        if len(nazwy) > MAKS_W_PODGLADZIE:
+            lista_ += f"\n  …i {len(nazwy) - MAKS_W_PODGLADZIE} innych"
+        uwaga = (f"\nW {opis_celu} są już pliki o tych nazwach — zgoda je NADPISZE: "
+                 + ", ".join(os.path.basename(d) for d in istniejace) + "." if istniejace else "")
+        return _zaproponuj(f"Chcesz {czynnosc[0]} {_ile(len(plan), 'plik', 'pliki', 'plików')} "
+                           f"do {opis_celu}:\n{lista_}{uwaga}",
+                           zrob, id_wypowiedzi)
+    return zrob()
+
+
+# ---------------------------------------------------------------
+# Wejście z agent.py
+# ---------------------------------------------------------------
+
+NARZEDZIA_PLIKOW = {"create_folder", "create_file", "list_files", "open_folder", "append_to_file",
+                    "edit_file", "move_files", "copy_files", "confirm_file_operation"}
+
+
+def wykonaj(nazwa, parametry, tekst_uzytkownika, id_wypowiedzi):
+    """
+    Jedno narzędzie plików. Zwraca (komunikat dla modelu, ok).
+
+    tekst_uzytkownika i id_wypowiedzi — do potwierdzeń: zgoda musi paść
+    w KOLEJNEJ wypowiedzi (opis na górze modułu).
+    """
+    p = parametry or {}
+    try:
+        if nazwa == "create_folder":
+            return utworz_folder(p.get("sciezka"))
+        if nazwa == "create_file":
+            return utworz_plik(p.get("sciezka"), p.get("tresc"), id_wypowiedzi)
+        if nazwa == "list_files":
+            return lista(p.get("sciezka"))
+        if nazwa == "open_folder":
+            return otworz_folder(p.get("sciezka"))
+        if nazwa == "append_to_file":
+            return dopisz(p.get("sciezka"), p.get("tekst"))
+        if nazwa == "edit_file":
+            return zmien(p.get("sciezka"), p.get("stary_tekst"), p.get("nowy_tekst"), id_wypowiedzi)
+        if nazwa in ("move_files", "copy_files"):
+            return przenies(p.get("pliki"), p.get("cel"), id_wypowiedzi, kopiuj=nazwa == "copy_files")
+        if nazwa == "confirm_file_operation":
+            return potwierdz(p.get("kod"), tekst_uzytkownika, id_wypowiedzi)
+    except BladSciezki as e:
+        return str(e), False
+    except OSError as e:
+        logger.warning("[PLIKI] %s: %s", nazwa, e)
+        return f"Nie udało się: {e.strerror or e}.", False
+    return f"Nieznane narzędzie plików: {nazwa}", False
