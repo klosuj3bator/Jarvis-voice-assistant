@@ -61,6 +61,7 @@ import akcje
 import app_launcher
 import briefing
 import email_monitor
+import indeks_notatek
 import kalendarz
 import konfiguracja
 import notes
@@ -164,6 +165,9 @@ KOMUNIKAT_WYSZUKIWANIA = "Dobra, sprawdzam, szefie."
 ZAPOWIEDZI = {
     "zagraj_piosenke": "Już szukam.",
     "zagraj_album": "Już szukam.",
+    # Zwykle ułamek sekundy, ale po większej zmianie w vaulcie indeks
+    # najpierw doczytuje zmienione pliki (indeks_notatek.py).
+    "search_notes": "Przeszukuję notatki.",
 }
 # Sterowanie odtwarzaniem (pauza, następny...) trwa ułamek sekundy, więc
 # zapowiedź "już szukam" byłaby tylko zbędnym słowem przed właściwą odpowiedzią.
@@ -454,6 +458,33 @@ NARZEDZIA = [
             "użytkownik pyta, o której coś zapisał."
         ),
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "search_notes",
+        "description": (
+            "Przeszukuje WSZYSTKIE notatki użytkownika po znaczeniu, nie tylko po "
+            "słowach: notatki głosowe z każdego dnia i jego vault Obsidiana. Używaj, "
+            "gdy pyta o coś, co kiedyś zanotował albo zapisał: 'co zanotowałem o…', "
+            "'kiedy pisałem o…', 'co mam w notatkach o…', 'jaki był ten pomysł na…'. "
+            "Także gdy pyta o swoje sprawy, które mógł gdzieś zapisać — terminy, kwoty, "
+            "rachunki, plany, ustalenia — a inne narzędzia tego nie dają: najpierw "
+            "sprawdź notatki, zanim powiesz, że nie wiesz. "
+            "Dzisiejsze notatki w całości daje przeczytaj_notatki. "
+            "Odpowiadaj WYŁĄCZNIE na podstawie zwróconych fragmentów i powiedz, skąd "
+            "jest informacja: datę ('zanotowałeś to dziewiątego października') albo "
+            "nazwę notatki. Jeśli żaden fragment nie odpowiada na pytanie, powiedz "
+            "wprost, że w notatkach tego nie ma — nie zgaduj."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "zapytanie": {"type": "string",
+                              "description": "Czego szukać — pytanie albo kilka słów, po polsku."},
+                "ile": {"type": "integer",
+                        "description": "Ile fragmentów zwrócić (domyślnie 5, najwyżej 10)."},
+            },
+            "required": ["zapytanie"],
+        },
     },
     {
         "name": "search_emails",
@@ -1408,6 +1439,9 @@ def _wykonaj_narzedzie(nazwa, parametry):
             komunikat, sukces = notes.dopisz(parametry.get("tresc"))
         elif nazwa == "przeczytaj_notatki":
             komunikat, sukces = notes.z_dzisiaj()
+        elif nazwa == "search_notes":
+            komunikat, sukces = indeks_notatek.szukaj_narzedzie(parametry.get("zapytanie"),
+                                                                parametry.get("ile"))
         elif nazwa == "sterowanie_systemem":
             polecenie = (parametry.get("polecenie") or "").strip().lower()
             if polecenie in system_control.POLECENIA_PO_ODPOWIEDZI:

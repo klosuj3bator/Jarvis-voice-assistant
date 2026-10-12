@@ -1,0 +1,2 @@
+# Tylko do testów (python -m pytest) — Jarvis sam z siebie ich nie potrzebuje.
+pytest==9.1.1

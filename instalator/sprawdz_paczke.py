@@ -29,7 +29,7 @@ UZYTKOWNIK = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), 
 
 ZAKAZANE_NAZWY = {
     ".env", "config.env", ".spotify_cache", ".spotify_cache_slownik", "memory.json",
-    "pamiec.json", "slownik.json", "reminders.json", "email_watches.json",
+    "pamiec.json", "slownik.json", "reminders.json", "email_watches.json", "indeks_notatek",
     "apps_cache.json", "apps_config.json", "jarvis.log", "notatki", "nierozpoznane",
     ".obsidian", ".claudian", ".git", "modele",
 }

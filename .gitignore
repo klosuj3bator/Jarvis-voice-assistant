@@ -30,3 +30,9 @@ pamiec.json.tmp
 build/
 dist/
 JarvisSetup*.exe
+
+# Testy (python -m pytest)
+.pytest_cache/
+
+# Indeks notatek do przeszukiwania (indeks_notatek.py) — zawiera treść notatek
+indeks_notatek/

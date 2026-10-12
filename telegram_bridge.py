@@ -72,10 +72,12 @@ a podejmie wątek (tak samo jak przy wejściu w słowo na głos, agent.py).
 KOMENDY: ZDALNE PROGRAMOWANIE
 =============================
 
-    /kod <polecenie>   — Claude Code zmienia kod Jarvisa (w tle, wynik przyjdzie sam)
+    /kod <polecenie>   — Claude Code zmienia kod Jarvisa (w tle, wynik przyjdzie
+                         sam, razem z wynikiem testów)
     /zatwierdz [opis]  — commit tego, co zmieniły zadania /kod
     /cofnij            — wycofanie niezatwierdzonych zmian z zadań /kod
-    /restart           — Jarvis uruchamia się od nowa; strażnik wraca do
+    /restart           — Jarvis uruchamia się od nowa; gdy testy nie przechodzą,
+                         najpierw ostrzega i czeka na "tak"; strażnik wraca do
                          ostatniej działającej wersji, jeśli nowa nie wstanie
 
 Opis w zdalny_kod.py i straznik.py. Komendy działają tylko jako TEKST od
@@ -118,6 +120,10 @@ MAKS_WIEK_WIADOMOSCI_S = 300
 
 # Ile sekund czekamy na odpisane "tak" przy restarcie i wyłączeniu.
 CZAS_NA_POTWIERDZENIE_S = 120
+
+# /restart Jarvisa mimo nieprzechodzących testów — czeka na "tak" w tym
+# samym miejscu co restart i wyłączenie komputera (_oczekujace).
+RESTART_JARVISA = "restart_jarvisa"
 
 # Ile ostatnich wiadomości rozmowy z telefonu pamiętamy (parzyście: pytanie + odpowiedź).
 MAKS_HISTORIA = 12
@@ -177,10 +183,11 @@ def _komenda(tekst):
 POMOC = ("Cześć! Pisz albo nagrywaj głosówki — przekażę je Jarvisowi. "
          "„stop” przerywa odpowiedź, która właśnie powstaje.\n\n"
          "Zdalne programowanie:\n"
-         "/kod <polecenie> — Claude Code zmienia kod Jarvisa\n"
+         "/kod <polecenie> — Claude Code zmienia kod Jarvisa, potem idą testy\n"
          "/zatwierdz [opis] — commit zmian z /kod\n"
          "/cofnij — wycofanie niezatwierdzonych zmian z /kod\n"
-         "/restart — uruchomienie nowej wersji (z powrotem do działającej, gdyby nie wstała)")
+         "/restart — uruchomienie nowej wersji (przy nieprzechodzących testach "
+         "pyta o „tak”; wraca do działającej, gdyby nie wstała)")
 
 
 # Co zapisujemy w historii zamiast odpowiedzi, której nie wysłaliśmy.
@@ -516,8 +523,25 @@ class MostTelegram:
             self._wyslij_tekst("Trwa zadanie /kod — restart przerwałby je w połowie. "
                                "Napisz /restart, gdy przyjdzie wynik.")
             return
-        self._wyslij_tekst("🔄 Restartuję się. Jeśli nowa wersja nie wstanie w minutę, wrócę "
-                           "do ostatniej działającej i dam Ci znać.")
+
+        # Testy przed restartem (opis w zdalny_kod.py). Nie przechodzą —
+        # ostrzegamy i czekamy na "tak", jak przy restarcie komputera.
+        testy = zdalny_kod.testy_przed_restartem(powiadom=self._wyslij_tekst)
+        if testy["stan"] == "blad":
+            with self._blokada:
+                self._oczekujace = (RESTART_JARVISA, time.monotonic())
+            logger.info("[TELEGRAM] Testy nie przechodzą — /restart czeka na „tak”.")
+            self._wyslij_tekst(
+                f"⚠️ Nie restartuję od razu — testy nie przechodzą.\n\n{zdalny_kod.opis_testow(testy)}"
+                "\n\nNowa wersja może się nie uruchomić albo działać źle. Odpisz „tak”, żeby "
+                f"mimo to zrestartować (masz {CZAS_NA_POTWIERDZENIE_S // 60} min), albo /cofnij.")
+            return
+        self._zrestartuj("" if testy["stan"] == "ok" else f" ({zdalny_kod.opis_testow(testy)})")
+
+    def _zrestartuj(self, dopisek=""):
+        """Właściwy restart Jarvisa — po sprawdzeniu testów albo po "tak"."""
+        self._wyslij_tekst(f"🔄 Restartuję się.{dopisek} Jeśli nowa wersja nie wstanie "
+                           "w minutę, wrócę do ostatniej działającej i dam Ci znać.")
         self._potwierdz_odebrane()
         self._restart()
 
@@ -564,6 +588,9 @@ class MostTelegram:
             return True
 
         logger.warning("[TELEGRAM] Potwierdzone „tak” — wykonuję: %s", polecenie)
+        if polecenie == RESTART_JARVISA:
+            self._zrestartuj(" Mimo nieprzechodzących testów, na Twoje „tak”.")
+            return True
         komunikat, _ = self._wykonaj_systemowe(polecenie)
         self._wyslij_tekst(komunikat)
         return True

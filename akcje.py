@@ -68,6 +68,7 @@ OPISY = {
                                 else "Wyszukiwanie w przeglądarce"),
     "zanotuj": "Nowa notatka",
     "przeczytaj_notatki": "Przeczytałem notatki",
+    "search_notes": "Przeszukałem notatki",       # bez pytania — mogłoby zdradzić treść
     "search_emails": lambda w: "Sprawdziłem pocztę" + (f" ({w['konto']})" if w.get("konto") else ""),
     "add_email_watch": "Nowa czujka poczty",
     "list_email_watches": "Czujki poczty",

@@ -795,6 +795,13 @@ def petla_jarvisa(orb):
         # działająca wersja (opis w zdalny_kod.py).
         zdalny_kod.gotowy()
 
+        # Indeks notatek do search_notes: w tle dociąga zmienione pliki (za
+        # pierwszym razem pobiera model ~135 MB). Moduł jest już wczytany —
+        # importuje go agent (opis w indeks_notatek.py).
+        import indeks_notatek
+
+        indeks_notatek.uruchom_w_tle()
+
         while not wake_word_listener.czy_zatrzymano():
             logger.info("=== TRYB: CZUWANIE (czekam na 'Hey Jarvis') ===")
 

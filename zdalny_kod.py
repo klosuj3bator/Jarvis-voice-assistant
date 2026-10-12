@@ -69,6 +69,20 @@ Przed każdym cofnięciem bieżący stan też trafia do migawki
 (refs/jarvis/cofniete/...), więc nic nie przepada na dobre.
 
 
+TESTY PO KAŻDYM /kod I PRZED /restart
+=====================================
+
+Po każdym zadaniu Jarvis uruchamia testy (`python -m pytest`, folder tests/)
+i dopisuje wynik do raportu. /restart sprawdza testy jeszcze raz — chyba że
+kod się od tamtej chwili nie zmienił (wynik pamiętamy razem z drzewem gita
+kodu, którego dotyczy). Gdy testy nie przechodzą, most do Telegrama ostrzega
+i czeka na odpisane "tak".
+
+Uwaga: uruchomienie testów to uruchomienie kodu, który właśnie napisał
+Claude Code — tak samo jak /restart. Dlatego testy dostają środowisko bez
+kluczy Jarvisa i limit czasu, a raport pokazuje, gdy zadanie zmieniło testy.
+
+
 OSTATNIA DZIAŁAJĄCA WERSJA (dla /restart)
 =========================================
 
@@ -104,6 +118,13 @@ PLIK_BRAMKI = os.path.join(FOLDER, "bramka.py")
 PLIK_RESTARTU = os.path.join(FOLDER, "restart.json")    # dla strażnika: co i jak uruchomić
 PLIK_GOTOWOSCI = os.path.join(FOLDER, "restart.gotowy")  # nowa wersja: "wstałam"
 PLIK_DZIENNIKA_STRAZNIKA = os.path.join(FOLDER, "straznik.log")
+PLIK_TESTOW = os.path.join(FOLDER, "testy.json")          # ostatni wynik testów i czego dotyczy
+
+# Najdłuższe uruchomienie testów — zwykle trwają kilka sekund.
+LIMIT_TESTOW_S = 5 * 60
+
+# Pliki testów: zmianę któregoś przez /kod wyraźnie zaznaczamy w raporcie.
+PLIKI_TESTOW = ("tests/", "pytest.ini", "conftest.py")
 
 # Strażnik przekazuje nowej wersji ten identyfikator; ona odpisuje nim
 # w PLIK_GOTOWOSCI — tak strażnik wie, że "gotowa" jest właśnie ta kopia.
@@ -425,14 +446,21 @@ def _ustawienia_claude():
     os.makedirs(FOLDER, exist_ok=True)
     with open(PLIK_BRAMKI, "w", encoding="utf-8") as plik:
         plik.write(KOD_BRAMKI)
-    # Bramka potrzebuje wejścia i wyjścia — pythonw.exe (Jarvis.pyw) ich nie
-    # ma, więc bierzemy python.exe z tego samego folderu.
+    return {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+        {"type": "command", "command": f'"{_python_konsolowy()}" "{PLIK_BRAMKI}"'}]}]}}
+
+
+def _python_konsolowy():
+    """
+    python.exe zamiast pythonw.exe (Jarvis.pyw). Bramka i testy potrzebują
+    wejścia i wyjścia, a pythonw ich nie ma — bierzemy python.exe z tego
+    samego folderu.
+    """
     python = sys.executable
     konsolowy = os.path.join(os.path.dirname(python), "python.exe")
     if os.path.basename(python).lower() == "pythonw.exe" and os.path.exists(konsolowy):
-        python = konsolowy
-    return {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
-        {"type": "command", "command": f'"{python}" "{PLIK_BRAMKI}"'}]}]}}
+        return konsolowy
+    return python
 
 
 def polecenie_claude():
@@ -484,7 +512,7 @@ def _uruchom_claude(tresc):
         return None, f"zakończył się kodem {proces.returncode}" + (f": {linie[-1]}" if linie else "")
 
 
-def _raport(wynik, blad, przed, po, czas):
+def _raport(wynik, blad, przed, po, czas, testy=None):
     """Wiadomość na Telegram po zadaniu."""
     if blad:
         czesci = [f"⚠️ Claude Code {blad} ({_czas(czas)})."]
@@ -506,8 +534,18 @@ def _raport(wynik, blad, przed, po, czas):
         czesci.append("Zablokowane próby:\n" + "\n".join(dict.fromkeys(odmowy[:6])))
 
     czesci.append(_lista_zmian(przed, po))
+    if testy:
+        czesci.append(opis_testow(testy))
+    # Testy, które zadanie samo zmieniło, mogły zostać "dopasowane" do błędu.
+    zmienione_testy = [s for _, s in _zmiany(przed, po)
+                       if s.startswith(PLIKI_TESTOW[0]) or os.path.basename(s) in PLIKI_TESTOW[1:]]
+    if zmienione_testy:
+        czesci.append("⚠️ To zadanie zmieniło też testy (" + ", ".join(zmienione_testy[:5])
+                      + ") — sprawdź, czy ich nie poluzowało.")
     if _zmiany(_ref(REF_PRZED) or przed, po):
-        czesci.append("/zatwierdz — commit · /cofnij — wycofanie · /restart — uruchom nową wersję")
+        czesci.append("/zatwierdz — commit · /cofnij — wycofanie · /restart — uruchom nową wersję"
+                      + (" (zapyta o potwierdzenie, bo testy nie przechodzą)"
+                         if testy and testy["stan"] == "blad" else ""))
     return "\n\n".join(czesci)
 
 
@@ -521,7 +559,9 @@ def _wykonaj(tresc, przed, wyslij):
         # Migawka PO zadaniu także wtedy, gdy Claude Code się wysypał —
         # mógł zdążyć coś zmienić, a Ty musisz o tym wiedzieć.
         po = zrzut("Jarvis: po zadaniu /kod")
-        tekst = _raport(wynik, blad, przed, po, time.monotonic() - start)
+        czas = time.monotonic() - start
+        testy = uruchom_testy(po)
+        tekst = _raport(wynik, blad, przed, po, czas, testy)
     except BladKodu as e:
         tekst = f"⚠️ Zadanie /kod: {e}"
     except Exception:
@@ -535,6 +575,133 @@ def _wykonaj(tresc, przed, wyslij):
         wyslij(tekst)
     except Exception:
         logger.exception("[KOD] Nie wysłałem wyniku zadania")
+
+
+# ---------------------------------------------------------------
+# Testy (opis w nagłówku: TESTY PO KAŻDYM /kod I PRZED /restart)
+# ---------------------------------------------------------------
+
+# pytest podsumowuje po angielsku ("2 failed, 100 passed in 2.10s").
+_SLOWA_PYTESTA = {"passed": "przeszło", "failed": "nie przeszło", "error": "z błędem",
+                  "errors": "z błędem", "skipped": "pominięto", "xfailed": "oczekiwanie nie przeszło",
+                  "xpassed": "nieoczekiwanie przeszło", "deselected": "odfiltrowano",
+                  "warning": "z ostrzeżeniem", "warnings": "z ostrzeżeniem"}
+
+
+def _brak_testow(powod):
+    return {"stan": "brak", "opis": powod, "nieudane": []}
+
+
+def _podsumowanie_pytesta(wyjscie):
+    """Ostatnia linia pytesta po polsku: "2 nie przeszło, 100 przeszło (2,1 s)"."""
+    for linia in reversed(wyjscie.splitlines()):
+        if not re.search(r"\d+ (passed|failed|errors?|skipped)\b", linia):
+            continue
+        liczby = re.findall(r"(\d+) (\w+)", linia.split(" in ")[0])
+        czas = re.search(r" in ([\d.]+)s", linia)
+        opis = ", ".join(f"{liczba} {_SLOWA_PYTESTA.get(slowo, slowo)}" for liczba, slowo in liczby)
+        return opis + (f" ({float(czas.group(1)):.1f} s)".replace(".", ",") if czas else "")
+    return ""
+
+
+def _drzewo(commit):
+    """Drzewo gita migawki — ten sam kod daje to samo drzewo, niezależnie od chwili."""
+    return _git("rev-parse", f"{commit}^{{tree}}")
+
+
+def uruchom_testy(commit=None):
+    """
+    Testy Jarvisa (python -m pytest) na kodzie, który jest teraz w folderze.
+
+    commit — migawka tego kodu (zrzut); wynik zapamiętujemy razem z jej
+             drzewem, żeby /restart nie puszczał testów drugi raz bez potrzeby.
+
+    Zwraca słownik:
+      "stan"     — "ok" (wszystkie przeszły), "blad" (któryś nie przeszedł albo
+                   testy w ogóle się nie uruchomiły) albo "brak" (nie ma
+                   czym albo czego testować)
+      "opis"     — podsumowanie po polsku, np. "102 przeszło (1,9 s)"
+      "nieudane" — identyfikatory testów, które nie przeszły
+    """
+    if not os.path.isdir(os.path.join(KATALOG, "tests")):
+        return _brak_testow("w projekcie nie ma folderu tests")
+    srodowisko = konfiguracja.srodowisko_bez_kluczy()
+    srodowisko["PYTHONIOENCODING"] = "utf-8"
+    try:
+        # Bez "-q": pytest.ini już go dodaje, a podwójne -q wycina linię
+        # podsumowania ("102 passed in 1.87s"), z której bierzemy opis.
+        proces = subprocess.Popen(
+            [_python_konsolowy(), "-m", "pytest", "-rfE", "--color=no", "-p", "no:cacheprovider"],
+            cwd=KATALOG, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, env=srodowisko, creationflags=BEZ_OKNA)
+    except OSError as e:
+        return _brak_testow(f"nie udało się uruchomić Pythona ({e})")
+
+    try:
+        wyjscie, _ = proces.communicate(timeout=LIMIT_TESTOW_S)
+    except subprocess.TimeoutExpired:
+        _zabij_drzewo(proces.pid)
+        proces.communicate()
+        wynik = {"stan": "blad", "nieudane": [],
+                 "opis": f"testy przekroczyły limit {LIMIT_TESTOW_S // 60} min, więc je zatrzymałem"}
+    else:
+        wyjscie = wyjscie.decode("utf-8", "replace")
+        if "No module named pytest" in wyjscie:
+            return _brak_testow("pytest nie jest zainstalowany (pip install -r requirements-dev.txt)")
+        if proces.returncode == 5:
+            return _brak_testow("pytest nie znalazł żadnych testów")
+        # "-rfE" dopisuje na końcu linie "FAILED plik::test - powód".
+        nieudane = [linia.split(" - ")[0].split(" ", 1)[1] for linia in wyjscie.splitlines()
+                    if linia.startswith(("FAILED ", "ERROR "))]
+        wynik = {"stan": "ok" if proces.returncode == 0 else "blad", "nieudane": nieudane,
+                 "opis": _podsumowanie_pytesta(wyjscie) or f"pytest zakończył się kodem {proces.returncode}"}
+
+    if commit:
+        try:
+            os.makedirs(FOLDER, exist_ok=True)
+            with open(PLIK_TESTOW, "w", encoding="utf-8") as plik:
+                json.dump({"drzewo": _drzewo(commit), "wynik": wynik}, plik, ensure_ascii=False)
+        except (OSError, BladKodu):
+            logger.warning("[KOD] Nie zapamiętałem wyniku testów.", exc_info=True)
+    logger.info("[KOD] Testy: %s — %s", wynik["stan"], wynik["opis"])
+    return wynik
+
+
+def testy_przed_restartem(powiadom=None):
+    """
+    /restart: wynik testów dla kodu, który zaraz wystartuje.
+
+    Jeśli testy szły już na dokładnie tym kodzie (np. zaraz po /kod), bierzemy
+    zapamiętany wynik. Jeśli nie — uruchamiamy je teraz, a powiadom(tekst)
+    uprzedza, że to chwilę potrwa.
+    """
+    if getattr(sys, "frozen", False):
+        return _brak_testow("wersja z instalatora nie ma testów")
+    commit = None
+    if dostepny()[0]:
+        commit = zrzut("Jarvis: kod przed /restart")
+        try:
+            with open(PLIK_TESTOW, encoding="utf-8") as plik:
+                zapamietany = json.load(plik)
+            if zapamietany.get("drzewo") == _drzewo(commit):
+                return zapamietany["wynik"]
+        except (OSError, ValueError, KeyError):
+            pass
+    if powiadom:
+        powiadom("🧪 Sprawdzam testy przed restartem…")
+    return uruchom_testy(commit)
+
+
+def opis_testow(testy, maks=8):
+    """Wynik testów jako fragment wiadomości na Telegram."""
+    if testy["stan"] == "ok":
+        return f"🧪 Testy: ✅ {testy['opis']}."
+    if testy["stan"] == "brak":
+        return f"🧪 Testy: nie uruchomiłem — {testy['opis']}."
+    linie = [f"🧪 Testy: ❌ {testy['opis']}."] + [f"• {n}" for n in testy["nieudane"][:maks]]
+    if len(testy["nieudane"]) > maks:
+        linie.append(f"• …i {len(testy['nieudane']) - maks} innych")
+    return "\n".join(linie)
 
 
 # ---------------------------------------------------------------

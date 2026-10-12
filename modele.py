@@ -167,46 +167,108 @@ def pobierz(postep=None, stop=None):
     lista = lista_do_pobrania()
     lista = [(a, c, r if r else _rozmiar(a), s) for a, c, r, s in lista]
     razem = sum(r or 0 for _, _, r, _ in lista)
-    pobrano = 0
+    stan = {"pobrano": 0, "ostatnio": 0.0}
     logger.info("[MODELE] Do pobrania: %d plików, %.0f MB.", len(lista), razem / 1e6)
 
-    for adres, cel, rozmiar, sha in lista:
-        opis = f"{os.path.basename(os.path.dirname(cel))}/{os.path.basename(cel)}"
-        os.makedirs(os.path.dirname(cel), exist_ok=True)
-        tymczasowy = cel + ".part"
-        skrot = hashlib.sha256()
-        ostatnio = 0.0
-        try:
-            with requests.get(adres, stream=True, timeout=30) as odp:
-                odp.raise_for_status()
-                with open(tymczasowy, "wb") as plik:
-                    for porcja in odp.iter_content(PORCJA):
-                        if stop is not None and stop.is_set():
-                            raise BladPobierania("Pobieranie przerwane.")
-                        plik.write(porcja)
-                        skrot.update(porcja)
-                        pobrano += len(porcja)
-                        if postep and time.monotonic() - ostatnio > 0.1:
-                            postep(pobrano, razem, opis)
-                            ostatnio = time.monotonic()
-        except BladPobierania:
-            _usun(tymczasowy)
-            raise
-        except (requests.RequestException, OSError) as e:
-            _usun(tymczasowy)
-            logger.warning("[MODELE] %s: %s", opis, type(e).__name__)
-            raise BladPobierania(f"Nie udało się pobrać {opis} — sprawdź internet "
-                                 "i miejsce na dysku, potem spróbuj jeszcze raz.") from None
+    def przy_porcji(bajtow, opis):
+        stan["pobrano"] += bajtow
+        if postep and time.monotonic() - stan["ostatnio"] > 0.1:
+            postep(stan["pobrano"], razem, opis)
+            stan["ostatnio"] = time.monotonic()
 
-        wielkosc = os.path.getsize(tymczasowy)
-        if (sha and skrot.hexdigest() != sha) or (rozmiar and wielkosc != rozmiar):
-            _usun(tymczasowy)
-            raise BladPobierania(f"Plik {opis} dotarł uszkodzony — spróbuj jeszcze raz.")
-        os.replace(tymczasowy, cel)
-        logger.info("[MODELE] Pobrano %s (%.1f MB).", opis, wielkosc / 1e6)
+    for adres, cel, rozmiar, sha in lista:
+        stan["ostatnio"] = 0.0          # pierwszy kawałek każdego pliku od razu na pasku
+        _sciagnij(adres, cel, rozmiar, sha, stop, przy_porcji)
 
     if postep:
         postep(razem, razem, "gotowe")
+
+
+def _sciagnij(adres, cel, rozmiar=None, sha=None, stop=None, przy_porcji=None):
+    """
+    Jeden plik: najpierw jako ".part", po sprawdzeniu sumy SHA-256 (albo
+    rozmiaru) — pod właściwą nazwą. Rzuca BladPobierania.
+
+    przy_porcji — funkcja(bajtów, opis) po każdej porcji, np. do paska postępu
+    """
+    opis = f"{os.path.basename(os.path.dirname(cel))}/{os.path.basename(cel)}"
+    os.makedirs(os.path.dirname(cel), exist_ok=True)
+    tymczasowy = cel + ".part"
+    skrot = hashlib.sha256()
+    try:
+        with requests.get(adres, stream=True, timeout=30) as odp:
+            odp.raise_for_status()
+            with open(tymczasowy, "wb") as plik:
+                for porcja in odp.iter_content(PORCJA):
+                    if stop is not None and stop.is_set():
+                        raise BladPobierania("Pobieranie przerwane.")
+                    plik.write(porcja)
+                    skrot.update(porcja)
+                    if przy_porcji:
+                        przy_porcji(len(porcja), opis)
+    except BladPobierania:
+        _usun(tymczasowy)
+        raise
+    except (requests.RequestException, OSError) as e:
+        _usun(tymczasowy)
+        logger.warning("[MODELE] %s: %s", opis, type(e).__name__)
+        raise BladPobierania(f"Nie udało się pobrać {opis} — sprawdź internet "
+                             "i miejsce na dysku, potem spróbuj jeszcze raz.") from None
+
+    wielkosc = os.path.getsize(tymczasowy)
+    if (sha and skrot.hexdigest() != sha) or (rozmiar and wielkosc != rozmiar):
+        _usun(tymczasowy)
+        raise BladPobierania(f"Plik {opis} dotarł uszkodzony — spróbuj jeszcze raz.")
+    os.replace(tymczasowy, cel)
+    logger.info("[MODELE] Pobrano %s (%.1f MB).", opis, wielkosc / 1e6)
+
+
+# ---------------------------------------------------------------
+# Model do przeszukiwania notatek (indeks_notatek.py)
+# ---------------------------------------------------------------
+#
+# Osobno od modeli mowy: Jarvis działa bez niego, więc nie wstrzymuje startu
+# ani kreatora — indeks_notatek.py pobiera go w tle przy pierwszej potrzebie.
+# Wersja ONNX skwantyzowana do 8 bitów (118 MB zamiast 470) — liczy ją
+# onnxruntime, bez PyTorcha. Dlaczego ten model — opis w indeks_notatek.py.
+
+MODEL_NOTATEK = "intfloat/multilingual-e5-small"
+# plik w repozytorium Hugging Face -> nazwa u nas
+PLIKI_MODELU_NOTATEK = {"onnx/model_qint8_avx512_vnni.onnx": "model.onnx",
+                        "onnx/tokenizer.json": "tokenizer.json"}
+
+
+def katalog_modelu_notatek():
+    return os.path.join(sciezki.MODELE, "notatki-e5-small")
+
+
+def model_notatek_gotowy():
+    return all(os.path.exists(os.path.join(katalog_modelu_notatek(), u_nas))
+               for u_nas in PLIKI_MODELU_NOTATEK.values())
+
+
+def pobierz_model_notatek(stop=None):
+    """Pobiera brakujące pliki modelu notatek (~135 MB). Rzuca BladPobierania."""
+    opisy = {}
+    for folder in {os.path.dirname(p) for p in PLIKI_MODELU_NOTATEK}:
+        adres = f"https://huggingface.co/api/models/{MODEL_NOTATEK}/tree/main/{folder}".rstrip("/")
+        try:
+            odp = requests.get(adres, timeout=20)
+            odp.raise_for_status()
+            opisy.update({p["path"]: p for p in odp.json() if p.get("type") == "file"})
+        except (requests.RequestException, ValueError):
+            raise BladPobierania("Nie mogę połączyć się z Hugging Face — sprawdź internet.") from None
+
+    for w_repo, u_nas in PLIKI_MODELU_NOTATEK.items():
+        cel = os.path.join(katalog_modelu_notatek(), u_nas)
+        if os.path.exists(cel):
+            continue
+        plik = opisy.get(w_repo)
+        if plik is None:
+            raise BladPobierania(f"W repozytorium modelu nie ma pliku {w_repo}.")
+        lfs = plik.get("lfs") or {}
+        _sciagnij(f"https://huggingface.co/{MODEL_NOTATEK}/resolve/main/{w_repo}", cel,
+                  lfs.get("size") or plik.get("size"), lfs.get("oid"), stop)
 
 
 def _usun(sciezka):
