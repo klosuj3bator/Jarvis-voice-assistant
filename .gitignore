@@ -36,3 +36,6 @@ JarvisSetup*.exe
 
 # Indeks notatek do przeszukiwania (indeks_notatek.py) — zawiera treść notatek
 indeks_notatek/
+
+# Rejestr plików utworzonych przez Jarvisa (pliki.py) — nazwy Twoich plików
+pliki_jarvisa.json

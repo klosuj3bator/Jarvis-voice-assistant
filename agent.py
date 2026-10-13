@@ -467,17 +467,20 @@ NARZEDZIA = [
         "name": "search_notes",
         "description": (
             "Przeszukuje WSZYSTKIE notatki użytkownika po znaczeniu, nie tylko po "
-            "słowach: notatki głosowe z każdego dnia i jego vault Obsidiana. Używaj, "
+            "słowach: notatki głosowe z każdego dnia, pliki tekstowe, które Jarvis sam "
+            "utworzył (np. lista zakupów na pulpicie), i jego vault Obsidiana. Używaj, "
             "gdy pyta o coś, co kiedyś zanotował albo zapisał: 'co zanotowałem o…', "
             "'kiedy pisałem o…', 'co mam w notatkach o…', 'jaki był ten pomysł na…'. "
             "Także gdy pyta o swoje sprawy, które mógł gdzieś zapisać — terminy, kwoty, "
             "rachunki, plany, ustalenia — a inne narzędzia tego nie dają: najpierw "
             "sprawdź notatki, zanim powiesz, że nie wiesz. "
             "Dzisiejsze notatki w całości daje przeczytaj_notatki. "
-            "Odpowiadaj WYŁĄCZNIE na podstawie zwróconych fragmentów i powiedz, skąd "
-            "jest informacja: datę ('zanotowałeś to dziewiątego października') albo "
-            "nazwę notatki. Jeśli żaden fragment nie odpowiada na pytanie, powiedz "
-            "wprost, że w notatkach tego nie ma — nie zgaduj."
+            "Odpowiadaj WYŁĄCZNIE na podstawie zwróconych fragmentów i podaj, skąd "
+            "jest informacja: NAZWĘ notatki i DATĘ z etykiety fragmentu ('w notatce "
+            "Budżet z trzeciego października', 'w notatce głosowej z dziewiątego "
+            "października', 'w notatce zakupy na pulpicie z dzisiaj') — datę także "
+            "wtedy, gdy to dzisiaj. Jeśli żaden fragment "
+            "nie odpowiada na pytanie, powiedz wprost, że w notatkach tego nie ma — nie zgaduj."
         ),
         "input_schema": {
             "type": "object",

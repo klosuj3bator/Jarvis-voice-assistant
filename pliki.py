@@ -74,6 +74,7 @@ potwierdzenia potrzeba Twojego "tak" w kolejnej wypowiedzi.
 import ctypes
 import glob
 import hashlib
+import json
 import logging
 import os
 import re
@@ -354,6 +355,7 @@ def utworz_plik(sciezka, tresc, id_wypowiedzi):
             # "x" = tylko nowy plik; gdyby w międzyczasie ktoś go utworzył — błąd, nie nadpisanie.
             with open(pelna, "x", encoding="utf-8", newline="") as plik:
                 plik.write(_z_koncem_linii(tresc))
+        _zarejestruj(pelna)          # do przeszukiwania notatek (opis przy PLIK_REJESTRU)
         akcje.zapisz("Nadpisałem plik" if nadpisz else "Nowy plik")
         logger.info("[PLIKI] %s: %s", "Nadpisany" if nadpisz else "Nowy plik", opis)
         return f"{'Nadpisałem' if nadpisz else 'Utworzyłem'} plik {opis}.", True
@@ -548,6 +550,9 @@ def przenies(wzorce, cel, id_wypowiedzi, kopiuj=False):
                 os.remove(zrodlo)                    # to wciąż przeniesienie: oryginał trafił do celu
             else:
                 shutil.move(zrodlo, docelowy)
+            # Plik od Jarvisa zostaje "od Jarvisa" w nowym miejscu (przy kopii — w obu).
+            if _w_rejestrze(zrodlo):
+                _zarejestruj(docelowy, zamiast=None if kopiuj else zrodlo)
             zrobione += 1
         akcje.zapisz(f"{czynnosc[2]} pliki ({zrobione})")
         logger.info("[PLIKI] %s %d plików do %s.", czynnosc[2], zrobione, opis_celu)
@@ -566,6 +571,79 @@ def przenies(wzorce, cel, id_wypowiedzi, kopiuj=False):
                            f"do {opis_celu}:\n{lista_}{uwaga}",
                            zrob, id_wypowiedzi)
     return zrob()
+
+
+# ---------------------------------------------------------------
+# Pliki utworzone przez Jarvisa — dla przeszukiwania notatek
+# ---------------------------------------------------------------
+#
+# search_notes (indeks_notatek.py) przeszukuje też pliki tekstowe, które
+# Jarvis sam utworzył — "lista zakupów na pulpicie" to też notatka. Ale TYLKO
+# te: reszty Twojego Pulpitu i Dokumentów indeks nie czyta. Dlatego
+# zapisujemy, co Jarvis utworzył, i dokąd potem to przeniósł. Sam rejestr to
+# lista ścieżek (nazwy plików są prywatne — plik leży poza gitem).
+
+PLIK_REJESTRU = sciezki.dane("pliki_jarvisa.json")
+_blokada_rejestru = threading.Lock()
+
+
+def _wczytaj_rejestr():
+    try:
+        with open(PLIK_REJESTRU, encoding="utf-8") as plik:
+            return [s for s in json.load(plik).get("pliki", []) if isinstance(s, str)]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def _zapisz_rejestr(lista):
+    try:
+        with open(PLIK_REJESTRU, "w", encoding="utf-8") as plik:
+            json.dump({"pliki": lista}, plik, ensure_ascii=False, indent=1)
+    except OSError:
+        logger.warning("[PLIKI] Nie zapisałem rejestru plików Jarvisa.", exc_info=True)
+
+
+def _w_rejestrze(sciezka):
+    klucz = _klucz(sciezka)
+    with _blokada_rejestru:
+        return any(_klucz(s) == klucz for s in _wczytaj_rejestr())
+
+
+def _zarejestruj(sciezka, zamiast=None):
+    """Dopisuje plik do rejestru; przy przeniesieniu zastępuje starą ścieżkę (zamiast)."""
+    nowa = os.path.realpath(sciezka)
+    with _blokada_rejestru:
+        lista = _wczytaj_rejestr()
+        if zamiast is not None:
+            lista = [s for s in lista if _klucz(s) != _klucz(zamiast)]
+        if all(_klucz(s) != _klucz(nowa) for s in lista):
+            lista.append(nowa)
+        _zapisz_rejestr(lista)
+
+
+def utworzone_pliki():
+    """
+    Pliki tekstowe od Jarvisa, które nadal istnieją i leżą w dozwolonych
+    miejscach: [(pełna ścieżka, opis, np. "Pulpit/zakupy.md")].
+
+    Pliki, których już nie ma (usunąłeś je sam), wypadają z rejestru. Te,
+    które wypadły z dozwolonych miejsc (zmiana JARVIS_DOZWOLONE_FOLDERY),
+    zostają w rejestrze, ale nie trafiają do wyszukiwania.
+    """
+    with _blokada_rejestru:
+        lista = _wczytaj_rejestr()
+        istniejace = [s for s in lista if os.path.isfile(s)]
+        if len(istniejace) != len(lista):
+            _zapisz_rejestr(istniejace)
+    wynik = []
+    for sciezka in istniejace:
+        if os.path.splitext(sciezka)[1].lower() not in ROZSZERZENIA_TEKSTU:
+            continue
+        try:
+            wynik.append(rozwiaz(sciezka))
+        except BladSciezki:
+            continue
+    return wynik
 
 
 # ---------------------------------------------------------------

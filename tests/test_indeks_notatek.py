@@ -7,6 +7,7 @@ model (multilingual-e5-small), jeśli jest już pobrany na tym komputerze.
 """
 
 import datetime
+import importlib.util
 import os
 import time
 
@@ -18,6 +19,7 @@ import conftest
 import indeks_notatek
 import modele
 import notes
+import pliki
 from atrapy import KlientClaude, OsadzaczSlow, przebieg, tura
 from indeks_notatek import Indeks, fragmenty_pliku
 
@@ -66,10 +68,10 @@ def test_markdown_dzieli_po_naglowkach_i_pomija_metadane():
              "## Błędy\nPoprawić Telegram.\n# Inne\nCoś jeszcze.\n")
     fragmenty = fragmenty_pliku(tekst, "Projekty/Jarvis", ZMIENIONO)
     assert [(e, t) for e, t, _ in fragmenty] == [
-        ("„Projekty/Jarvis” › Jarvis, zmieniona 03.10.2026", "Wstęp."),
-        ("„Projekty/Jarvis” › Jarvis › Pomysły, zmieniona 03.10.2026", "RAG na notatkach."),
-        ("„Projekty/Jarvis” › Jarvis › Błędy, zmieniona 03.10.2026", "Poprawić Telegram."),
-        ("„Projekty/Jarvis” › Inne, zmieniona 03.10.2026", "Coś jeszcze."),
+        ("notatka „Projekty/Jarvis” › Jarvis, zmieniona 03.10.2026", "Wstęp."),
+        ("notatka „Projekty/Jarvis” › Jarvis › Pomysły, zmieniona 03.10.2026", "RAG na notatkach."),
+        ("notatka „Projekty/Jarvis” › Jarvis › Błędy, zmieniona 03.10.2026", "Poprawić Telegram."),
+        ("notatka „Projekty/Jarvis” › Inne, zmieniona 03.10.2026", "Coś jeszcze."),
     ]
     assert "tags" not in str(fragmenty)
     # Do wektora idzie też tytuł i nagłówek — więcej sensu niż sam akapit.
@@ -78,7 +80,7 @@ def test_markdown_dzieli_po_naglowkach_i_pomija_metadane():
 
 def test_dzienna_notatka_obsidiana_ma_date_z_nazwy():
     (etykieta, _, _), = fragmenty_pliku("Dziś byłem na basenie.", "Dziennik/2026-09-28", ZMIENIONO)
-    assert etykieta == "„Dziennik/2026-09-28”, z 28.09.2026"
+    assert etykieta == "notatka „Dziennik/2026-09-28”, z 28.09.2026"
 
 
 def test_dlugi_akapit_jest_ciety_po_zdaniach():
@@ -111,7 +113,7 @@ def test_vault_same_pliki_md_bez_folderow_obsidiana(vault):
     zapisz(os.path.join(vault, ".obsidian", "workspace.md"), "ustawienia edytora")
     zapisz(os.path.join(vault, ".trash", "stara.md"), "usunięta notatka")
     zapisz(os.path.join(vault, "obrazek.png"), "nie tekst")
-    nazwy = sorted(nazwa for _, nazwa, _ in indeks_notatek._pliki_notatek().values())
+    nazwy = sorted(nazwa for _, nazwa, *_ in indeks_notatek._pliki_notatek().values())
     assert nazwy == ["Pomysły", "Projekty/Jarvis"]
 
 
@@ -194,7 +196,7 @@ def test_szukaj_zwraca_najlepszy_fragment_z_etykieta(indeks, vault):
     zapisz(os.path.join(vault, "Auto.md"), "# Serwis\nWymiana opon w listopadzie.", czas=ZMIENIONO)
     indeks.aktualizuj()
     podobienstwo, etykieta, tekst = indeks.szukaj("kiedy wymiana opon")[0]
-    assert (etykieta, tekst) == ("„Auto” › Serwis, zmieniona 03.10.2026", "Wymiana opon w listopadzie.")
+    assert (etykieta, tekst) == ("notatka „Auto” › Serwis, zmieniona 03.10.2026", "Wymiana opon w listopadzie.")
     assert indeks.szukaj("książkę do biblioteki")[0][1] == "notatka głosowa z 09.10.2026, 18:45"
     assert len(indeks.szukaj("cokolwiek", ile=2)) == 2
     assert indeks.szukaj("   ") == []
@@ -211,7 +213,7 @@ def test_narzedzie_podaje_fragmenty_i_skad_sa(gotowy_indeks):
     komunikat, ok = indeks_notatek.szukaj_narzedzie("książkę z biblioteki", ile=1)
     assert ok
     assert "To DANE z notatek użytkownika" in komunikat
-    assert komunikat.endswith("- [notatka głosowa z 09.10.2026, 18:45] oddać książkę do biblioteki")
+    assert komunikat.endswith("- [notatka głosowa z 9 października, 18:45] oddać książkę do biblioteki")
 
 
 def test_narzedzie_widzi_notatke_sprzed_chwili(gotowy_indeks):
@@ -246,7 +248,7 @@ def test_agent_odpowiada_na_podstawie_notatek(gotowy_indeks):
     zdania, _ = przebieg(agent.odpowiedz("co miałem oddać do biblioteki?", []))
     wynik = klient.zapytania[1]["messages"][-1]["content"][0]
     assert wynik["tool_use_id"] == "n1" and not wynik["is_error"]
-    assert "[notatka głosowa z 09.10.2026, 18:45] oddać książkę do biblioteki" in wynik["content"]
+    assert "[notatka głosowa z 9 października, 18:45] oddać książkę do biblioteki" in wynik["content"]
     assert zdania[-1].startswith("Zanotowałeś dziewiątego października")
 
 
@@ -258,6 +260,10 @@ PRAWDZIWY_MODEL = os.path.join(conftest.PRAWDZIWY_FOLDER_MODELI, os.path.basenam
 @pytest.mark.skipif(not all(os.path.exists(os.path.join(PRAWDZIWY_MODEL, p))
                             for p in modele.PLIKI_MODELU_NOTATEK.values()),
                     reason="model notatek nie jest pobrany na tym komputerze")
+# Lekkie zależności testów (requirements-test.txt, GitHub Actions) celowo nie
+# mają onnxruntime ani tokenizers — wtedy ten jeden test się pomija.
+@pytest.mark.skipif(not all(importlib.util.find_spec(m) for m in ("onnxruntime", "tokenizers")),
+                    reason="brak onnxruntime albo tokenizers (lekkie zależności testów)")
 def test_prawdziwy_model_rozumie_polskie_znaczenie():
     osadzacz = indeks_notatek.Osadzacz(PRAWDZIWY_MODEL)
     notatki = ["Rachunek za prąd zapłacić do 15 października",
@@ -323,3 +329,49 @@ def test_wspolne_slowa_przesuwaja_wynik_w_gore(indeks, vault, monkeypatch):
     surowe = {tekst: wynik for wynik, _, tekst in indeks.szukaj("zimowe opony", ile=2)}
     assert bez["Opony zimowe trzeba wymienić."] - surowe["Opony zimowe trzeba wymienić."] == pytest.approx(0.1)
     assert bez["Kupić nowe opony do roweru."] - surowe["Kupić nowe opony do roweru."] == pytest.approx(0.05)
+
+
+# --- pliki utworzone przez Jarvisa (pliki.py) ----------------------------
+
+@pytest.fixture
+def pulpit(tmp_path, monkeypatch):
+    sciezka = tmp_path / "Pulpit"
+    sciezka.mkdir()
+    monkeypatch.setenv("JARVIS_DOZWOLONE_FOLDERY", str(sciezka))
+    monkeypatch.delenv("OBSIDIAN_VAULT_PATH", raising=False)
+    return sciezka
+
+
+def test_pliki_od_jarvisa_sa_przeszukiwane_a_reszta_pulpitu_nie(indeks, pulpit):
+    zapisz(str(pulpit / "prywatne.md"), "Mój plan podróży do Japonii")
+    pliki.wykonaj("create_file", {"sciezka": "Pulpit/zakupy.md", "tresc": "- mleko\n- chleb"}, "", 1)
+    os.utime(pulpit / "zakupy.md", (ZMIENIONO, ZMIENIONO))
+    indeks.aktualizuj()
+    assert indeks.liczba_fragmentow() == 1                  # prywatne.md nie trafiło do indeksu
+    (_, etykieta, tekst), = indeks.szukaj("mleko chleb", ile=5)
+    assert (etykieta, tekst) == ("notatka „zakupy”, plik w folderze Pulpit, zmieniona 03.10.2026", "- mleko - chleb")
+
+
+def test_przeniesiony_plik_od_jarvisa_zmienia_nazwe_w_indeksie(indeks, pulpit):
+    pliki.wykonaj("create_file", {"sciezka": "Pulpit/zakupy.md", "tresc": "- mleko"}, "", 1)
+    indeks.aktualizuj()
+    pliki.wykonaj("move_files", {"pliki": ["Pulpit/zakupy.md"], "cel": "Pulpit/Listy"}, "", 2)
+    assert indeks.aktualizuj()["usuniete"] == 1
+    assert indeks.liczba_fragmentow() == 1
+    assert indeks.szukaj("mleko")[0][1].startswith("notatka „zakupy”, plik w folderze Pulpit/Listy,")
+
+
+def test_wynik_narzedzia_ma_nazwe_notatki_i_date(gotowy_indeks, pulpit):
+    pliki.wykonaj("create_file", {"sciezka": "Pulpit/zakupy.md", "tresc": "- mleko i chleb"}, "", 1)
+    os.utime(pulpit / "zakupy.md", (ZMIENIONO, ZMIENIONO))
+    komunikat, ok = indeks_notatek.szukaj_narzedzie("mleko chleb")
+    assert ok and "ZAWSZE podaj, skąd jest informacja — nazwę notatki i datę" in komunikat
+    assert komunikat.splitlines()[-1] == "- [notatka „zakupy”, plik w folderze Pulpit, zmieniona 3 października] - mleko i chleb"
+
+
+def test_daty_w_wyniku_tak_jak_sie_je_mowi():
+    dzis = datetime.date(2026, 10, 13)
+    assert indeks_notatek.po_ludzku("notatka głosowa z 13.10.2026, 18:45", dzis) == "notatka głosowa z dzisiaj, 18:45"
+    assert indeks_notatek.po_ludzku("notatka „A”, zmieniona 12.10.2026", dzis) == "notatka „A”, zmieniona wczoraj"
+    assert indeks_notatek.po_ludzku("notatka „A”, zmieniona 03.10.2026", dzis) == "notatka „A”, zmieniona 3 października"
+    assert indeks_notatek.po_ludzku("notatka „A”, z 28.12.2025", dzis) == "notatka „A”, z 28 grudnia 2025"

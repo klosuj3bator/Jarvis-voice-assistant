@@ -107,7 +107,16 @@ def test_dowiazanie_nie_wyprowadzi_poza_miejsce(m):
         pliki.rozwiaz("Pulpit/skrot/x.txt")
 
 
-def test_domyslnie_pulpit_i_dokumenty(monkeypatch):
+def test_domyslnie_pulpit_i_dokumenty(monkeypatch, tmp_path):
+    # Prawdziwe położenie pyta Windows — tu tylko, czy podaje pełną ścieżkę
+    # (na maszynie GitHuba folder Pulpitu wcale nie musi istnieć).
+    assert os.path.isabs(pliki._znany_folder(pliki._PULPIT, "Desktop"))
+    assert os.path.isabs(pliki._znany_folder(pliki._DOKUMENTY, "Documents"))
+    # Bez JARVIS_DOZWOLONE_FOLDERY: oba znane foldery, z polskimi i angielskimi nazwami.
+    znane = {pliki._PULPIT: tmp_path / "Desktop", pliki._DOKUMENTY: tmp_path / "Documents"}
+    for folder in znane.values():
+        folder.mkdir()
+    monkeypatch.setattr(pliki, "_znany_folder", lambda guid, zapasowy: str(znane[guid]))
     monkeypatch.delenv(pliki.ZMIENNA_MIEJSC, raising=False)
     miejsca = pliki.miejsca()
     assert [nazwa for nazwa, _, _ in miejsca] == ["Pulpit", "Dokumenty"]
@@ -355,3 +364,37 @@ def test_po_odczycie_poczty_narzedzia_plikow_sa_zablokowane(m, monkeypatch):
     )
     przebieg(agent.odpowiedz("co w poczcie?", []))
     assert not (m.pulpit / "od-maila.txt").exists()
+
+
+# --- rejestr plików od Jarvisa (dla wyszukiwania notatek) ------------------
+
+def opisy():
+    return sorted(opis for _, opis in pliki.utworzone_pliki())
+
+
+def test_rejestr_zna_tylko_pliki_od_jarvisa(m):
+    zapisz(str(m.pulpit / "moje.md"), "moja prywatna notatka")
+    pdfy(m.pulpit, 2)
+    w("create_file", sciezka="Pulpit/zakupy.md", tresc="- mleko")
+    w("create_file", sciezka="Dokumenty/plan", tresc="plan")
+    w("move_files", pliki=["Pulpit/*.pdf"], cel="Pulpit/Faktury")
+    assert opisy() == ["Dokumenty/plan.txt", "Pulpit/zakupy.md"]
+
+
+def test_rejestr_idzie_za_plikiem_przy_przenoszeniu_i_kopiowaniu(m):
+    w("create_file", sciezka="Pulpit/zakupy.md", tresc="- mleko")
+    w("move_files", pliki=["Pulpit/zakupy.md"], cel="Dokumenty/Listy")
+    assert opisy() == ["Dokumenty/Listy/zakupy.md"]
+    w("copy_files", pliki=["Dokumenty/Listy/zakupy.md"], cel="Pulpit")
+    assert opisy() == ["Dokumenty/Listy/zakupy.md", "Pulpit/zakupy.md"]
+
+
+def test_rejestr_zapomina_usuniete_i_pomija_spoza_miejsc(m, monkeypatch):
+    w("create_file", sciezka="Pulpit/a.md", tresc="a")
+    w("create_file", sciezka="Dokumenty/b.md", tresc="b")
+    os.remove(m.pulpit / "a.md")                         # usunięty ręcznie, poza Jarvisem
+    assert opisy() == ["Dokumenty/b.md"]
+    assert len(pliki._wczytaj_rejestr()) == 1
+    monkeypatch.setenv(pliki.ZMIENNA_MIEJSC, str(m.pulpit))   # Dokumenty już niedozwolone
+    assert opisy() == []
+    assert len(pliki._wczytaj_rejestr()) == 1             # w rejestrze zostaje — może wrócić

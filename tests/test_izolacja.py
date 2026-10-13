@@ -12,6 +12,7 @@ import konfiguracja
 import modele
 import notes
 import pamiec
+import pliki
 import reminders
 import sciezki
 import slownik
@@ -27,8 +28,10 @@ def _w_folderze_testow(sciezka):
     pamiec.SCIEZKA_FAKTOW, pamiec.SCIEZKA_PAMIECI, reminders.SCIEZKA, notes.KATALOG_NOTATEK,
     email_monitor.SCIEZKA, slownik.SCIEZKA, konfiguracja.PLIK, konfiguracja.PLIK_PROJEKTU,
     zdalny_kod.FOLDER, indeks_notatek.PLIK_BAZY, modele.katalog_modelu_notatek(),
+    pliki.PLIK_REJESTRU,
 ], ids=["memory.json", "pamiec.json", "reminders.json", "notatki", "email_watches.json",
-        "slownik.json", "config.env", ".env", "zdalny", "indeks_notatek", "model notatek"])
+        "slownik.json", "config.env", ".env", "zdalny", "indeks_notatek", "model notatek",
+        "pliki_jarvisa.json"])
 def test_pliki_danych_leza_w_folderze_tymczasowym(sciezka):
     assert _w_folderze_testow(sciezka)
     for prawdziwy in conftest.PRAWDZIWE_FOLDERY:

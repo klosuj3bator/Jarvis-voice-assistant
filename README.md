@@ -1,5 +1,7 @@
 # 🤖 Jarvis — a personal voice assistant for Windows
 
+[![Tests](https://github.com/klosuj3bator/Jarvis-voice-assistant/actions/workflows/testy.yml/badge.svg)](https://github.com/klosuj3bator/Jarvis-voice-assistant/actions/workflows/testy.yml)
+
 An Iron Man–style assistant you talk to in Polish. Say **"Hey Jarvis"** and speak naturally: a Claude agent decides which tools to use, answers out loud and keeps the conversation going. Wake-word detection and speech recognition run locally; you can also reach Jarvis from your phone via Telegram.
 
 ## ✨ Key features
@@ -7,7 +9,7 @@ An Iron Man–style assistant you talk to in Polish. Say **"Hey Jarvis"** and sp
 - 🎙️ **Conversation with interruptions** — "Hey Jarvis" once, then keep talking. Cut in mid-answer and it stops mid-word; "mów dalej" (go on) resumes exactly where it was cut off. In headphones mode any word interrupts it
 - 🧠 **Agent with tools** — one Claude tool-use loop (`agent.py`) with 41 tools plus web search; it sees tool results and retries on errors. Long-term memory, saved only when you ask
 - 🎵 **Spotify** — songs, albums, pause, next, "what's playing", shuffle, repeat
-- 📝 **Notes with semantic search** — voice notes saved as dated Markdown files; "co zanotowałem o…" searches all of them and your Obsidian vault by meaning (local embeddings, RAG) and answers with the date or note name
+- 📝 **Notes with semantic search** — voice notes saved as dated Markdown files; "co zanotowałem o…" searches them, the text files Jarvis created (e.g. a shopping list on the Desktop) and your Obsidian vault by meaning (local embeddings, RAG), and answers with the note's name and date
 - ⏰ **Reminders and timers** — "in 20 minutes", "tomorrow at eight"; spoken and sent to Telegram, survive restarts
 - 📅 **Google Calendar** (read-only) — "what do I have tomorrow?", recurring events, morning briefing, "welcome back" summary
 - 📧 **Gmail with rules** (read-only, up to 3 accounts) — search mail and set watch rules ("tell me when a mail from Allegro arrives"); misheard account names are matched fuzzily
@@ -102,9 +104,13 @@ Keys entered in the wizard are stored in `%APPDATA%\Jarvis\config.env`. The sour
 ## 🧪 Running tests
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements-test.txt
 python -m pytest
 ```
+
+`requirements-test.txt` is a lightweight list: only what the tests import, without the Whisper and embedding models, Qt or audio libraries (about a minute to install in a fresh environment). If you already installed `requirements.txt`, you only need `pytest` from `requirements-dev.txt`.
+
+**GitHub Actions** ([`.github/workflows/testy.yml`](.github/workflows/testy.yml)) runs the same suite on Windows for every push and pull request. No keys or secrets are needed: every external service is mocked. The badge at the top shows the result.
 
 The suite in `tests/` (about 190 tests, ~20 s) covers:
 - notes and the semantic notes index (with a mock embedding model, plus the real one if downloaded);
@@ -143,12 +149,13 @@ After every `/kod` task Jarvis runs the suite and adds the result to the Telegra
 | `zdalny_kod.py`, `straznik.py` | remote Claude Code tasks; restart watchdog and rollback |
 | `spotify_controller.py`, `app_launcher.py`, `przegladarka.py`, `system_control.py` | music, apps, browser, PC control |
 | `notes.py`, `reminders.py`, `kalendarz.py`, `email_monitor.py`, `briefing.py`, `powitanie.py` | notes, reminders, calendar, mail, briefing, greeting |
-| `indeks_notatek.py` | semantic notes search (`search_notes`): local multilingual-e5-small embeddings, SQLite vector index, updates only changed files |
+| `indeks_notatek.py` | semantic notes search (`search_notes`) over voice notes, files created by Jarvis and the Obsidian vault: local multilingual-e5-small embeddings, SQLite vector index, updates only changed files |
 | `pamiec.py`, `slownik.py`, `schowek.py`, `stan_komputera.py` | memory, vocabulary, clipboard, PC status |
 | `pliki.py`, `potwierdzenia.py` | file tools with allowed folders and confirmations; shared "tak" detection |
 | `gui.py`, `hud.qml`, `Panel.qml`, `tapeta.py`, `panel.py`, `pasek_boczny.py` | HUD, wallpaper mode, side panel |
 | `setup_wizard.py`, `konfiguracja.py`, `rozruch.py` | wizard and Settings, key loading, parallel startup |
-| `tests/`, `pytest.ini` | automated tests with mocked services (`python -m pytest`) |
+| `tests/`, `pytest.ini`, `requirements-test.txt` | automated tests with mocked services (`python -m pytest`), lightweight test dependencies |
+| `.github/workflows/testy.yml` | GitHub Actions: the test suite on Windows for every push and pull request |
 | `instalator/` | installer build: PyInstaller, Inno Setup, privacy check (`python instalator/zbuduj.py`) |
 
 ## ⚠️ Known limitations

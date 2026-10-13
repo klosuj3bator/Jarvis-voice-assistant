@@ -1,0 +1,15 @@
+# Zależności TESTÓW (python -m pytest) — to instaluje GitHub Actions (.github/workflows/testy.yml).
+#
+# Tylko to, czego testy naprawdę używają (sprawdzone 13.10 — lista modułów
+# wczytanych w trakcie całego zestawu). Bez modeli i ciężkich bibliotek:
+# Whispera, openWakeWord, onnxruntime, Qt, bibliotek audio i anthropic —
+# testy zastępują je atrapami (tests/atrapy.py), więc instalacja trwa chwilę.
+# Pełna lista do uruchamiania Jarvisa jest w requirements.txt.
+-r requirements-dev.txt
+numpy==2.5.2
+psutil==7.2.2
+python-dotenv==1.2.2
+pywin32==312
+requests==2.34.2
+spotipy==2.26.0
+tzdata==2026.4
