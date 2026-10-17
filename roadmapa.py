@@ -31,20 +31,25 @@ wstanie, wraca do poprzedniej. Sam Jarvisa nie restartuje nigdy.
 MapaZadan.md
 ============
 
-Każde zadanie to nagłówek "## ". Zrobione mają "[x]" (Jarvis dopisuje je
-sam w commicie zadania). Pola pod nagłówkiem — wszystkie opcjonalne:
+Zadaniem jest POJEDYNCZA PONUMEROWANA LINIJKA — numer, trudność w nawiasie
+kwadratowym i treść; numer w nawiasie na końcu to odnośnik do pomysłu
+w POMYSLY_JARVIS.md:
 
-    ## Testy dla briefing.py
-    - Trudność: łatwe
-    - Dotyczy: briefing.py, poranny przegląd dnia
-    - Zmieni: błędy w briefingu wyłapią testy, zanim usłyszysz je rano
-    - Potrzebne: (tylko Część B) czego Jarvis potrzebuje od Ciebie
+    ## CZĘŚĆ A — zadania do wykonania samodzielnie przez Claude Code
+    ### Etap 3. Rozmowa i głos
+    15. [Ł] Dźwięk potwierdzenia (krótki "bip") po wykryciu słowa aktywującego. (5)
 
-    Dowolny opis — trafia do Claude Code jako treść zadania.
+Nagłówki (#, ##, ###) tylko grupują — nigdy nie są zadaniem. Nagłówek
+z "CZĘŚĆ B" zaczyna zadania wymagające Twojego udziału (opis niżej).
+Zrobione Jarvis oznacza sam w commicie zadania: "15. ✅ [Ł] ..." (rozumie też
+"15. [x] ..."). Gdy plik nazywa się MapaZadan.txt, czyta go tak samo (ale
+MapaZadan.md ma pierwszeństwo).
 
-Zadania dzielą się na części nagłówkami "# Część A", "# Część B". Bez
-nagłówka części — jak Część A. Gdy plik nazywa się MapaZadan.txt, Jarvis
-czyta go tak samo (ale MapaZadan.md ma pierwszeństwo).
+Trudność wybiera model: [Ł] łatwe i [Ś] średnie — model do zadań łatwych
+(domyślnie Sonnet 5.5), [T] trudne — do trudnych (domyślnie Opus 5.5); oba
+w Ustawieniach (Ogólne → Claude Code). Bez trudności Jarvis nie zgaduje —
+pyta Cię w propozycji, którym modelem zrobić zadanie. Model widać
+w propozycji i można go tam zmienić przed akceptacją.
 
 
 CZĘŚĆ B: NAJPIERW PYTANIA, POTEM NIC SAM
@@ -52,21 +57,15 @@ CZĘŚĆ B: NAJPIERW PYTANIA, POTEM NIC SAM
 
 Zadania z Części B potrzebują czegoś od Ciebie (decyzji, konta, pliku,
 klucza). Gdy przyjdzie kolej na takie zadanie, Jarvis go NIE proponuje do
-akceptacji, tylko pisze, czego potrzebuje, i czeka:
-
-  - z pola "Potrzebne:", jeśli je dopisałeś,
-  - a jeśli nie — pyta Claude Code, który przegląda kod TYLKO DO ODCZYTU
-    (Read, Glob, Grep; nic nie zmienia) i wypisuje, czego potrzebuje.
+akceptacji, tylko pisze, czego potrzebuje, i czeka. Żeby to ustalić, pyta
+Claude Code, który przegląda kod TYLKO DO ODCZYTU (Read, Glob, Grep; nic
+nie zmienia) i wypisuje, czego potrzebuje.
 
 Odpowiadasz na Telegramie odpowiedzią (Odpowiedz) na tę wiadomość — tyle
 razy, ile trzeba; Jarvis dołączy to do treści zadania. Hasła i klucze idą
 do Ustawień, nie do czatu: wiadomość, która wygląda na sekret, jest
 odrzucana i nie trafia do Claude Code. Zadanie zaczyna się dopiero, gdy
 klikniesz "Zaczynaj".
-
-Trudność wybiera model z Ustawień (Ogólne → Claude Code): "łatwe" — model
-do zadań łatwych, "trudne" albo brak oznaczenia — do trudnych. Model widać
-w propozycji i można go tam zmienić przed akceptacją.
 
 Kolejność kolejki to kolejność w pliku; "Pomiń" przesuwa zadanie na koniec.
 Jarvis czyta mapę zadań z gałęzi roadmap, do której przed każdą propozycją
@@ -163,15 +162,13 @@ STREFA = ZoneInfo("Europe/Warsaw")
 
 @dataclass
 class Zadanie:
-    tytul: str
-    trudnosc: str           # "latwe" albo "trudne"
-    oznaczona: bool         # czy trudność była w pliku (bez niej — "trudne")
-    dotyczy: str
-    zmieni: str
-    opis: str
-    zrobione: bool
+    numer: int              # numer z mapy (1–100)
+    tytul: str              # treść zadania, bez numeru, trudności i odnośnika
+    trudnosc: str | None    # "Ł", "Ś", "T" albo None — brak (wtedy Jarvis pyta)
+    pomysl: int | None      # odnośnik do POMYSLY_JARVIS.md: "(79)" na końcu linijki
     czesc: str = "A"        # "A" albo "B" (najpierw pytania — opis w nagłówku)
-    potrzebne: str = ""     # pole "Potrzebne:" — czego Jarvis potrzebuje od Ciebie
+    etap: str = ""          # nagłówek etapu, pod którym stoi zadanie (dla Claude Code)
+    zrobione: bool = False
 
 
 def _plik_mapy(katalog=None):
@@ -183,81 +180,80 @@ def _plik_mapy(katalog=None):
     return os.path.join(katalog, PLIKI_MAPY[0])
 
 
-_NAGLOWEK = re.compile(r"^##\s+(?:\[(?P<znak>[ xX])\]\s*)?(?P<tytul>\S.*?)\s*$")
-# Nagłówek części: "# Część B", "# Czesc B — ...", "# Part B".
-_CZESC = re.compile(r"^#\s+(?:część|czesc|cz\.?|part)\s+(?P<litera>[a-z])\b", re.I)
-_POLE = re.compile(r"^\s*[-*]?\s*\**\s*(?P<nazwa>trudno\S*|poziom|czego dotyczy|dotyczy|co zmieni|zmieni|"
-                   r"potrzebne|czego potrzebuj\S*)"
-                   r"\s*\**\s*:\s*\**\s*(?P<wartosc>.*?)\s*\**\s*$", re.I)
-
-
-def _trudnosc(wartosc):
-    """"łatwe", "Łatwa", "easy" -> "latwe"; wszystko inne -> "trudne"."""
-    znormalizowana = wartosc.strip().lower().replace("ł", "l")
-    return "latwe" if znormalizowana.startswith(("lat", "prost", "easy", "mal")) else "trudne"
+# "15. [Ł] Treść. (5)" — także "15) ...", "- 15. ...", zrobione "15. ✅ ..." i "15. [x] ...".
+_LINIA = re.compile(r"^(?P<poczatek>\s*(?:[-*]\s+)?(?P<numer>\d{1,3})[.)]\s+)"
+                    r"(?P<zrobione>(?:✅|\[[xX]\])\s*)?"
+                    r"(?:\[(?P<trudnosc>[^\]]{1,3})\]\s*)?(?P<tresc>\S.*?)\s*$")
+_ODNOSNIK = re.compile(r"\s*\((?P<pomysl>\d{1,3})\)\s*\.?\s*$")
+_NAGLOWEK = re.compile(r"^#{1,6}\s+(?P<tekst>.*)$")
+# Część w nagłówku dowolnego poziomu: "## CZĘŚĆ B — ...", "# Część B", "### Part B".
+_CZESC = re.compile(r"(?:część|czesc|cz\.|part)\s+(?P<litera>[a-z])\b", re.I)
+_TRUDNOSCI = {"Ł": "Ł", "L": "Ł", "Ś": "Ś", "S": "Ś", "T": "T"}
+OPIS_TRUDNOSCI = {"Ł": "łatwe", "Ś": "średnie", "T": "trudne"}
 
 
 def wczytaj_zadania(tekst):
     """
     Zadania z treści mapy zadań, w kolejności z pliku (opis formatu w nagłówku).
-    Nagłówki w blokach kodu (```) to przykłady, nie zadania.
+    Linijki w blokach kodu (```) to przykłady, nie zadania.
     """
-    surowe, biezace, w_kodzie, czesc = [], None, False, "A"
+    zadania, w_kodzie, czesc, etap = [], False, "A", ""
     for linia in tekst.splitlines():
         if linia.lstrip().startswith("```"):
             w_kodzie = not w_kodzie
-            if biezace is not None:
-                biezace["linie"].append(linia)
             continue
-        dopasowanie = None if w_kodzie else _NAGLOWEK.match(linia)
-        if dopasowanie:
-            tytul = dopasowanie.group("tytul")
-            zrobione = (dopasowanie.group("znak") or " ").lower() == "x" or tytul.startswith("✅")
-            biezace = {"tytul": tytul.lstrip("✅ ").strip(), "zrobione": zrobione, "linie": [],
-                       "czesc": czesc}
-            surowe.append(biezace)
-        elif not w_kodzie and re.match(r"^#{1}\s", linia):
-            biezace = None              # nagłówek "# " kończy zadanie...
-            nowa = _CZESC.match(linia)  # ...i może zaczynać nową część
-            czesc = nowa.group("litera").upper() if nowa else czesc
-        elif biezace is not None:
-            biezace["linie"].append(linia)
-
-    zadania = []
-    for z in surowe:
-        pola, opis = {}, []
-        for linia in z["linie"]:
-            pole = _POLE.match(linia)
-            if pole:
-                nazwa = pole.group("nazwa").lower()
-                klucz = ("trudnosc" if nazwa.startswith(("trudno", "poziom"))
-                         else "dotyczy" if "dotyczy" in nazwa
-                         else "potrzebne" if "potrzeb" in nazwa else "zmieni")
-                pola[klucz] = pole.group("wartosc").strip()
+        if w_kodzie:
+            continue
+        naglowek = _NAGLOWEK.match(linia)
+        if naglowek:
+            # Nagłówek tylko grupuje: zmienia część albo etap, zadaniem nie jest nigdy.
+            nowa = _CZESC.search(naglowek.group("tekst"))
+            if nowa:
+                czesc, etap = nowa.group("litera").upper(), ""
             else:
-                opis.append(linia)
-        zadania.append(Zadanie(
-            tytul=z["tytul"], trudnosc=_trudnosc(pola.get("trudnosc", "")),
-            oznaczona="trudnosc" in pola, dotyczy=pola.get("dotyczy", ""),
-            zmieni=pola.get("zmieni", ""), opis="\n".join(opis).strip(), zrobione=z["zrobione"],
-            czesc=z["czesc"], potrzebne=pola.get("potrzebne", "")))
+                etap = naglowek.group("tekst").strip()
+            continue
+        dopasowanie = _LINIA.match(linia)
+        if not dopasowanie:
+            continue
+        tresc = dopasowanie.group("tresc")
+        zrobione = bool(dopasowanie.group("zrobione")) or (tresc.startswith("~~") and tresc.endswith("~~"))
+        tresc = tresc.strip("~ ")
+        odnosnik = _ODNOSNIK.search(tresc)
+        if odnosnik:
+            tresc = tresc[:odnosnik.start()].strip()
+        trudnosc = _TRUDNOSCI.get((dopasowanie.group("trudnosc") or "").strip().upper())
+        zadania.append(Zadanie(numer=int(dopasowanie.group("numer")), tytul=tresc, trudnosc=trudnosc,
+                               pomysl=int(odnosnik.group("pomysl")) if odnosnik else None,
+                               czesc=czesc, etap=etap, zrobione=zrobione))
     return zadania
 
 
-def oznacz_zrobione(tekst, tytul):
-    """Treść mapy zadań z zadaniem `tytul` oznaczonym "[x]". (nowa treść, czy znaleziono)."""
+def oznacz_zrobione(tekst, tytul, numer=None):
+    """
+    Treść mapy zadań z zadaniem oznaczonym "✅" zaraz po numerze.
+    Szukamy po numerze i treści (sam numer mógł się zmienić). (nowa treść, czy znaleziono).
+    """
     linie = tekst.splitlines(keepends=True)
-    w_kodzie = False
-    for numer, linia in enumerate(linie):
+    kandydaci, w_kodzie = [], False
+    for indeks, linia in enumerate(linie):
         if linia.lstrip().startswith("```"):
             w_kodzie = not w_kodzie
             continue
-        dopasowanie = None if w_kodzie else _NAGLOWEK.match(linia.rstrip("\r\n"))
-        if dopasowanie and dopasowanie.group("tytul").lstrip("✅ ").strip() == tytul:
-            koniec = linia[len(linia.rstrip("\r\n")):]
-            linie[numer] = f"## [x] {tytul}{koniec}"
-            return "".join(linie), True
-    return tekst, False
+        dopasowanie = None if w_kodzie else _LINIA.match(linia.rstrip("\r\n"))
+        if not dopasowanie or dopasowanie.group("zrobione"):
+            continue
+        tresc = dopasowanie.group("tresc").strip("~ ")
+        odnosnik = _ODNOSNIK.search(tresc)
+        tresc = tresc[:odnosnik.start()].strip() if odnosnik else tresc
+        if tresc == tytul:
+            kandydaci.append((int(dopasowanie.group("numer")) == numer, indeks, dopasowanie.group("poczatek")))
+    if not kandydaci:
+        return tekst, False
+    # Najpierw linijka z tym samym numerem; gdy numer się zmienił — pierwsza z tą treścią.
+    _, indeks, poczatek = max(kandydaci, key=lambda k: (k[0], -k[1]))
+    linie[indeks] = poczatek + "✅ " + linie[indeks][len(poczatek):]
+    return "".join(linie), True
 
 
 def kolejka(zadania, stan):
@@ -269,7 +265,20 @@ def kolejka(zadania, stan):
 
 
 def model_dla(zadanie):
-    return konfiguracja.model_claude(zadanie.trudnosc)
+    """[Ł] i [Ś] — model do zadań łatwych, [T] — do trudnych; bez trudności — None (pytamy)."""
+    if zadanie.trudnosc is None:
+        return None
+    return konfiguracja.model_claude("trudne" if zadanie.trudnosc == "T" else "latwe")
+
+
+def licznik(pozycja, ile):
+    """"zadanie 1 ze 100", "zadanie 3 z 99" — "ze" tylko przed "sto…"."""
+    return f"zadanie {pozycja} {'ze' if 100 <= ile <= 199 else 'z'} {ile}"
+
+
+def _etykieta(zadanie):
+    """"nr 15 [Ł]" — numer i trudność, jak w mapie."""
+    return f"nr {zadanie.numer} [{zadanie.trudnosc}]" if zadanie.trudnosc else f"nr {zadanie.numer} [?]"
 
 
 # ---------------------------------------------------------------
@@ -391,6 +400,28 @@ _restart = None         # restart Jarvisa ze strażnikiem — tylko dla /scal
 _zatrzymaj = threading.Event()
 _watek = None
 _proces = None          # Claude Code w toku (żeby zatrzymać go przy zamykaniu Jarvisa)
+_rezerwacja = None      # opis, pod którym zadanie zajęło Claude Code (zdalny_kod.zarezerwuj)
+
+
+def _zarezerwuj(opis):
+    """Zajmuje Claude Code dla zadania z roadmapy. False, gdy coś już trwa."""
+    global _rezerwacja
+    if not zdalny_kod.zarezerwuj(opis):
+        return False
+    _rezerwacja = opis
+    return True
+
+
+def _zwolnij():
+    """
+    Zwalnia Claude Code zajęty przez zadanie — tylko własną rezerwację. Wołane
+    zaraz po Claude Code: testy i commit go nie potrzebują, a kolejna
+    propozycja (sprawdzenie zadania z Części B) musi mieć wolną drogę.
+    """
+    global _rezerwacja
+    if _rezerwacja is not None:
+        zdalny_kod.zwolnij(_rezerwacja)
+        _rezerwacja = None
 
 
 def _nowy_stan():
@@ -579,84 +610,64 @@ def _zapamietaj_testy(stan, drzewo, wynik):
 # Propozycje
 # ---------------------------------------------------------------
 
-def _opis_modelu(model, zadanie=None):
-    if zadanie is None:
-        return konfiguracja.nazwa_modelu(model)
+def _opis_modelu(model, zadanie):
+    """Nazwa modelu; przy zmienionym — skąd domyślny."""
+    if model is None:
+        return "❓ brak trudności w mapie — wybierz model"
     domyslny = model_dla(zadanie)
-    skad = ("zadanie łatwe" if zadanie.trudnosc == "latwe" else
-            "zadanie trudne" if zadanie.oznaczona else "trudność nieoznaczona — jak trudne")
-    return (f"{konfiguracja.nazwa_modelu(model)} ({skad})" if model == domyslny
-            else f"{konfiguracja.nazwa_modelu(model)} (zmieniony przez Ciebie; domyślnie "
-                 f"{konfiguracja.nazwa_modelu(domyslny)})")
+    if domyslny is None or model == domyslny:
+        return konfiguracja.nazwa_modelu(model)
+    return f"{konfiguracja.nazwa_modelu(model)} (zmieniony; domyślnie {konfiguracja.nazwa_modelu(domyslny)})"
 
 
-def _tekst_propozycji(zadanie, model, numer, ile):
-    czesci = [f"🗺 Propozycja z roadmapy ({numer}/{ile} w kolejce):\n„{zadanie.tytul}”"]
-    if zadanie.dotyczy:
-        czesci.append(f"Czego dotyczy: {zadanie.dotyczy}")
-    if zadanie.zmieni:
-        czesci.append(f"Co zmieni: {zadanie.zmieni}")
-    if zadanie.opis:
-        czesci.append(_skrot(zadanie.opis, 600))
-    czesci.append(f"🧠 Model: {_opis_modelu(model, zadanie)}")
-    czesci.append(f"Zmiany trafią na gałąź {GALAZ}; do {GALAZ_GLOWNA} — dopiero po /scal.")
-    return "\n\n".join(czesci)
+def _tekst_propozycji(zadanie, propozycja, numer, ile):
+    """
+    Krótko: licznik, numer, trudność, treść i model — bez fragmentów pliku.
+    W Części B dochodzi to, czego Jarvis potrzebuje od Ciebie.
+    """
+    czesci = [f"🗺 {licznik(numer, ile).capitalize()} · {_etykieta(zadanie)}"
+              + (" · 🧩 wymaga Twojego udziału (Część B)" if zadanie.czesc == "B" else ""),
+              zadanie.tytul,
+              f"🧠 Model: {_opis_modelu(propozycja['model'], zadanie)}"]
+    if zadanie.czesc != "B":
+        return "\n\n".join(czesci)
 
-
-def _przyciski_propozycji(pid):
-    return [[("✅ Akceptuj", f"rm|a|{pid}"), ("⏭ Pomiń", f"rm|p|{pid}"),
-             ("📋 Pokaż inne", f"rm|i|{pid}")],
-            [("🧠 Zmień model", f"rm|m|{pid}")]]
-
-
-def _tekst_czesci_b(zadanie, propozycja, numer, ile):
-    """Zadanie z Części B: czego Jarvis potrzebuje, co już od Ciebie ma, jak odpowiedzieć."""
-    czesci = [f"🧩 Zadanie z Części B ({numer}/{ile} w kolejce):\n„{zadanie.tytul}”"]
-    if zadanie.dotyczy:
-        czesci.append(f"Czego dotyczy: {zadanie.dotyczy}")
-    if zadanie.zmieni:
-        czesci.append(f"Co zmieni: {zadanie.zmieni}")
-    if zadanie.opis:
-        czesci.append(_skrot(zadanie.opis, 400))
     if propozycja.get("stan") == "analiza":
         czesci.append("🔍 Tego zadania nie zaczynam sam. Sprawdzam w kodzie (tylko czytanie), "
                       "czego będę od Ciebie potrzebować…")
+        return "\n\n".join(czesci)
+    if propozycja.get("potrzeby"):
+        czesci.append("Zanim zacznę, potrzebuję od Ciebie:\n" + propozycja["potrzeby"])
     else:
-        if propozycja.get("potrzeby"):
-            czesci.append("Zanim zacznę, potrzebuję od Ciebie:\n" + propozycja["potrzeby"])
-        else:
-            czesci.append("Nie ustaliłem, czego potrzebuję (" + (propozycja.get("blad") or "nie wiem czemu")
-                          + "). Napisz mi, co mam wiedzieć, albo kliknij 🔍 Sprawdź jeszcze raz.")
-        od_ciebie = propozycja.get("od_ciebie") or []
-        if od_ciebie:
-            czesci.append(f"📝 Od Ciebie ({len(od_ciebie)}): " + _skrot(" / ".join(od_ciebie), 400))
-        czesci.append("Odpowiedz na TĘ wiadomość (przytrzymaj → Odpowiedz) — możesz kilka razy. "
-                      "Hasła i klucze wpisz w Ustawieniach Jarvisa, nie tutaj. Gdy wszystko będzie, "
-                      "kliknij ▶️ Zaczynaj.")
-    czesci.append(f"🧠 Model: {_opis_modelu(propozycja['model'], zadanie)}")
-    czesci.append(f"Zmiany trafią na gałąź {GALAZ}; do {GALAZ_GLOWNA} — dopiero po /scal.")
+        czesci.append("Nie ustaliłem, czego potrzebuję (" + (propozycja.get("blad") or "nie wiem czemu")
+                      + "). Napisz mi, co mam wiedzieć, albo kliknij 🔍 Sprawdź jeszcze raz.")
+    od_ciebie = propozycja.get("od_ciebie") or []
+    if od_ciebie:
+        czesci.append(f"📝 Od Ciebie ({len(od_ciebie)}): " + _skrot(" / ".join(od_ciebie), 400))
+    czesci.append("Odpowiedz na TĘ wiadomość (przytrzymaj → Odpowiedz). Hasła i klucze — w Ustawieniach, "
+                  "nie tutaj. Gdy wszystko będzie, kliknij ▶️ Zaczynaj.")
     return "\n\n".join(czesci)
 
 
-def _przyciski_czesci_b(propozycja):
+def _przyciski_propozycji(zadanie, propozycja):
     pid = propozycja["pid"]
-    if propozycja.get("stan") == "analiza":
+    if zadanie.czesc == "B" and propozycja.get("stan") == "analiza":
         return [[("⏭ Pomiń", f"rm|p|{pid}")]]
+    if propozycja["model"] is None:
+        # Bez trudności nie zgadujemy — najpierw wybór modelu, dopiero potem "Akceptuj".
+        return ([[(nazwa, f"rm|M|{pid}|{n}")] for n, (_, nazwa) in enumerate(konfiguracja.MODELE_CLAUDE_CODE)]
+                + [[("⏭ Pomiń", f"rm|p|{pid}"), ("📋 Pokaż inne", f"rm|i|{pid}")]])
+    start = "▶️ Zaczynaj" if zadanie.czesc == "B" else "✅ Akceptuj"
     drugi = [("🧠 Zmień model", f"rm|m|{pid}")]
-    if not propozycja.get("potrzeby"):
+    if zadanie.czesc == "B" and not propozycja.get("potrzeby"):
         drugi.append(("🔍 Sprawdź jeszcze raz", f"rm|r|{pid}"))
-    return [[("▶️ Zaczynaj", f"rm|a|{pid}"), ("⏭ Pomiń", f"rm|p|{pid}"),
-             ("📋 Pokaż inne", f"rm|i|{pid}")], drugi]
+    return [[(start, f"rm|a|{pid}"), ("⏭ Pomiń", f"rm|p|{pid}"), ("📋 Pokaż inne", f"rm|i|{pid}")], drugi]
 
 
 def _pokaz_propozycje(id_wiadomosci, zadanie, propozycja, numer, ile, naglowek=""):
-    """Wysyła albo podmienia propozycję — zwykłą albo z Części B. Zwraca id wiadomości."""
-    if zadanie.czesc == "B":
-        tekst, przyciski = _tekst_czesci_b(zadanie, propozycja, numer, ile), _przyciski_czesci_b(propozycja)
-    else:
-        tekst = _tekst_propozycji(zadanie, propozycja["model"], numer, ile)
-        przyciski = _przyciski_propozycji(propozycja["pid"])
-    tekst = (naglowek + "\n\n" if naglowek else "") + tekst
+    """Wysyła albo podmienia propozycję. Zwraca id wiadomości."""
+    tekst = (naglowek + "\n\n" if naglowek else "") + _tekst_propozycji(zadanie, propozycja, numer, ile)
+    przyciski = _przyciski_propozycji(zadanie, propozycja)
     if id_wiadomosci:
         _edytuj(id_wiadomosci, tekst, przyciski)
         return id_wiadomosci
@@ -683,25 +694,25 @@ def zaproponuj(tytul=None, id_wiadomosci=None, naglowek=""):
             stan["propozycja"] = None
             _zapisz(stan)
             nazwa = os.path.basename(_plik_mapy())
-            tekst = (f"🎉 Kolejka roadmapy jest pusta. Dopisz zadania do {nazwa} (commit na main), "
+            tekst = (f"🎉 Wszystkie zadania z {nazwa} są zrobione. Dopisz nowe (commit na main), "
                      "a potem /roadmapa dalej." if zadania else
-                     f"W {nazwa} nie ma jeszcze zadań (nagłówki „## ”). Dopisz je i zrób commit na "
-                     "main, a potem /roadmapa dalej.")
+                     f"W {nazwa} nie ma zadań — ponumerowanych linijek w rodzaju „1. [Ł] Treść”. "
+                     "Dopisz je i zrób commit na main, a potem /roadmapa dalej.")
             _edytuj(id_wiadomosci, tekst) if id_wiadomosci else _wyslij(tekst)
             return
         zadanie = next((z for z in lista if z.tytul == tytul), lista[0])
-        propozycja = {"pid": _pid(), "tytul": zadanie.tytul, "model": model_dla(zadanie), "id": None}
+        propozycja = {"pid": _pid(), "tytul": zadanie.tytul, "numer": zadanie.numer,
+                      "model": model_dla(zadanie), "id": None}
         if zadanie.czesc == "B":
-            # Część B: najpierw czego potrzebuję — z pola "Potrzebne:" albo od
-            # Claude Code (samo czytanie, w tle). Bez "Akceptuj", dopóki nie wiesz.
-            propozycja.update(czesc="B", od_ciebie=[], blad=None, potrzeby=zadanie.potrzebne or None,
-                              stan="czeka" if zadanie.potrzebne else "analiza")
+            # Część B: najpierw czego potrzebuję — od Claude Code (samo czytanie,
+            # w tle). Bez "Zaczynaj", dopóki tego nie wiesz.
+            propozycja.update(czesc="B", od_ciebie=[], blad=None, potrzeby=None, stan="analiza")
         propozycja["id"] = _pokaz_propozycje(id_wiadomosci, zadanie, propozycja,
                                              lista.index(zadanie) + 1, len(lista), naglowek)
         stan["propozycja"] = propozycja
         _zapisz(stan)
-        logger.info("[ROADMAPA] Propozycja: %s (%s, część %s).", zadanie.tytul, propozycja["model"],
-                    zadanie.czesc)
+        logger.info("[ROADMAPA] Propozycja: nr %d %s (%s, część %s).", zadanie.numer, zadanie.tytul,
+                    propozycja["model"], zadanie.czesc)
         if propozycja.get("stan") == "analiza":
             _sprawdz_potrzeby_w_tle(propozycja["pid"])
 
@@ -728,8 +739,7 @@ def _pokaz_inne(stan, id_wiadomosci):
         return
     stan["inne"] = [z.tytul for z in lista[:MAKS_POKAZANYCH]]
     _zapisz(stan)
-    przyciski = [[(_skrot(f"{n}. {z.tytul} ({'łatwe' if z.trudnosc == 'latwe' else 'trudne'}"
-                          + (", część B" if z.czesc == "B" else "") + ")", 60),
+    przyciski = [[(_skrot(f"{_etykieta(z)}{' B' if z.czesc == 'B' else ''} {z.tytul}", 60),
                    f"rm|t|{propozycja['pid']}|{n - 1}")] for n, z in enumerate(lista[:MAKS_POKAZANYCH], 1)]
     przyciski.append([("↩️ Wróć", f"rm|w|{propozycja['pid']}")])
     _edytuj(id_wiadomosci, f"📋 Inne zadania w kolejce ({len(lista)}) — wybierz jedno:", przyciski)
@@ -749,17 +759,29 @@ def _menu_modeli(stan, id_wiadomosci):
 
 def _tresc_sprawdzenia(zadanie):
     return ("To NIE jest jeszcze polecenie wykonania zadania — niczego nie zmieniaj (masz tylko "
-            f"odczyt plików).\n\nZadanie z Części B mapy zadań Jarvisa ({os.path.basename(_plik_mapy())}): "
-            f"{zadanie.tytul}\n" + (f"Czego dotyczy: {zadanie.dotyczy}\n" if zadanie.dotyczy else "")
-            + (f"Co zmieni: {zadanie.zmieni}\n" if zadanie.zmieni else "")
-            + (f"\n{zadanie.opis}\n" if zadanie.opis else "")
-            + "\nZadania z Części B Jarvis zaczyna dopiero wtedy, gdy użytkownik da mu to, czego trzeba. "
-              "Przejrzyj kod tyle, ile potrzeba, i napisz po polsku, czego potrzebujesz od użytkownika, "
-              "żeby zrobić to zadanie dobrze: decyzje do podjęcia, informacje, konta albo usługi do "
-              "założenia, pliki. Najwyżej 6 krótkich punktów, każdy od „• ”. Nie proś o wpisanie haseł "
-              "ani kluczy w odpowiedzi — klucze użytkownik wpisuje w Ustawieniach Jarvisa; napisz tylko, "
-              "który klucz i skąd go wziąć. Jeśli niczego nie potrzebujesz, napisz dokładnie: "
-              "„Niczego — mogę zaczynać.” Bez wstępu i podsumowania.")
+            f"odczyt plików).\n\n{_opis_dla_claude(zadanie)}\n\n"
+            "Zadania z Części B Jarvis zaczyna dopiero wtedy, gdy użytkownik da mu to, czego trzeba. "
+            "Przejrzyj kod tyle, ile potrzeba, i napisz po polsku, czego potrzebujesz od użytkownika, "
+            "żeby zrobić to zadanie dobrze: decyzje do podjęcia, informacje, konta albo usługi do "
+            "założenia, pliki. Najwyżej 6 krótkich punktów, każdy od „• ”. Nie proś o wpisanie haseł "
+            "ani kluczy w odpowiedzi — klucze użytkownik wpisuje w Ustawieniach Jarvisa; napisz tylko, "
+            "który klucz i skąd go wziąć. Jeśli niczego nie potrzebujesz, napisz dokładnie: "
+            "„Niczego — mogę zaczynać.” Bez wstępu i podsumowania.")
+
+
+def _opis_dla_claude(zadanie):
+    """Zadanie z mapy dla Claude Code: numer, treść, trudność, etap, odnośnik do pomysłu."""
+    linie = [f"Zadanie nr {zadanie.numer} z mapy zadań Jarvisa ({os.path.basename(_plik_mapy())}): "
+             f"{zadanie.tytul}",
+             "Trudność: " + (OPIS_TRUDNOSCI[zadanie.trudnosc] if zadanie.trudnosc else "nieoznaczona")]
+    if zadanie.etap:
+        linie.append(f"Etap: {zadanie.etap}")
+    if zadanie.czesc == "B":
+        linie.append("Część B — zadanie wymagające udziału użytkownika.")
+    if zadanie.pomysl is not None:
+        linie.append(f"Szczegóły: pomysł nr {zadanie.pomysl} w POMYSLY_JARVIS.md — jeśli ten plik jest "
+                     "w projekcie, przeczytaj go.")
+    return "\n".join(linie)
 
 
 def _sprawdz_potrzeby_w_tle(pid):
@@ -782,18 +804,21 @@ def _sprawdz_potrzeby(pid):
         zadanie = next((z for z in _zadania(dociagnij=False) if z.tytul == propozycja["tytul"]), None)
         if zadanie is None:
             blad = "zadanie zniknęło z mapy"
-        elif not zdalny_kod.zarezerwuj(f"sprawdzanie zadania z Części B „{_skrot(zadanie.tytul)}”"):
+        elif not zdalny_kod.zarezerwuj(sprawdzanie := f"sprawdzanie zadania z Części B „{_skrot(zadanie.tytul)}”"):
             blad = f"trwa {zdalny_kod.zajety()}"
         else:
             try:
-                polecenie = zdalny_kod.polecenie_claude(propozycja["model"], kontynuuj=False,
-                                                        zakazane=ZAKAZANE, narzedzia=NARZEDZIA_ODCZYTU)
+                # Bez trudności model zadania jeszcze nie jest wybrany — samo
+                # czytanie robi model do zadań łatwych.
+                polecenie = zdalny_kod.polecenie_claude(
+                    propozycja["model"] or konfiguracja.model_claude("latwe"), kontynuuj=False,
+                    zakazane=ZAKAZANE, narzedzia=NARZEDZIA_ODCZYTU)
                 wynik, blad_claude, bledy = zdalny_kod.uruchom_claude_code(
                     _tresc_sprawdzenia(zadanie), polecenie, KOPIA, LIMIT_SPRAWDZANIA_S,
                     przy_starcie=_zapamietaj_proces)
             finally:
                 _proces = None
-                zdalny_kod.zwolnij()
+                zdalny_kod.zwolnij(sprawdzanie)
             if komunikat_limitu(wynik, bledy):
                 wroca = kiedy_limity_wroca(komunikat_limitu(wynik, bledy))
                 blad = "skończyły się limity Claude Code" + (
@@ -877,7 +902,8 @@ def _dodatek_czesci_b(propozycja):
 # ---------------------------------------------------------------
 
 def _opis_zadania(zadanie):
-    tytul = "naprawa testów" if zadanie.get("naprawa") else f"„{zadanie['tytul']}”"
+    tytul = ("naprawa testów" if zadanie.get("naprawa") else
+             (f"nr {zadanie['numer']} " if zadanie.get("numer") else "") + f"„{zadanie['tytul']}”")
     model = konfiguracja.nazwa_modelu(zadanie["model"])
     if zadanie["stan"] in ("sprawdzam", "trwa"):
         minuty = int((time.time() - zadanie["od"]) // 60)
@@ -888,14 +914,7 @@ def _opis_zadania(zadanie):
 
 
 def _tresc_zadania(zadanie, dodatek=""):
-    pola = [f"Trudność: {'łatwe' if zadanie.trudnosc == 'latwe' else 'trudne'}"]
-    if zadanie.dotyczy:
-        pola.append(f"Czego dotyczy: {zadanie.dotyczy}")
-    if zadanie.zmieni:
-        pola.append(f"Co zmieni: {zadanie.zmieni}")
-    return (f"Zadanie z mapy zadań Jarvisa ({os.path.basename(_plik_mapy())}): {zadanie.tytul}\n\n"
-            + "\n".join(pola) + (f"\n\n{zadanie.opis}" if zadanie.opis else "")
-            + (f"\n\n{dodatek}" if dodatek else "") + "\n\n" + ZASADY)
+    return _opis_dla_claude(zadanie) + (f"\n\n{dodatek}" if dodatek else "") + "\n\n" + ZASADY
 
 
 ZASADY = (
@@ -964,24 +983,28 @@ def _akceptuj(stan, id_wiadomosci):
     if propozycja.get("czesc") == "B" and propozycja.get("stan") == "analiza":
         _wyslij("Jeszcze sprawdzam, czego potrzebuję do tego zadania — chwila.")
         return
+    if propozycja.get("model") is None:
+        _wyslij("To zadanie nie ma trudności w mapie — najpierw wybierz model pod propozycją.")
+        return
     opis = f"zadanie z roadmapy „{_skrot(propozycja['tytul'])}”"
-    if not zdalny_kod.zarezerwuj(opis):
+    if not _zarezerwuj(opis):
         _wyslij(f"Trwa {zdalny_kod.zajety()}. Naraz robię jedno zadanie Claude Code — "
                 "kliknij „Akceptuj” jeszcze raz, gdy się skończy.")
         return
     stan["propozycja"] = None
-    stan["zadanie"] = {"pid": _pid(), "tytul": propozycja["tytul"], "model": propozycja["model"],
-                       "stan": "sprawdzam", "od": time.time(), "naprawa": False, "powod": "",
+    stan["zadanie"] = {"pid": _pid(), "tytul": propozycja["tytul"], "numer": propozycja.get("numer"),
+                       "model": propozycja["model"], "stan": "sprawdzam", "od": time.time(),
+                       "naprawa": False, "powod": "",
                        "dodatek": _dodatek_czesci_b(propozycja) if propozycja.get("czesc") == "B" else ""}
     _zapisz(stan)
-    _edytuj(id_wiadomosci, f"✅ Zaakceptowane: „{propozycja['tytul']}” — "
+    _edytuj(id_wiadomosci, f"✅ Zaakceptowane: nr {propozycja.get('numer')} „{propozycja['tytul']}” — "
                            f"{konfiguracja.nazwa_modelu(propozycja['model'])}.\n"
                            "Sprawdzam, czy nie ma niezatwierdzonych zmian i czy testy przechodzą…")
     _w_tle("nowe")
 
 
 def _napraw(stan):
-    if not zdalny_kod.zarezerwuj("naprawa testów na gałęzi roadmap"):
+    if not _zarezerwuj("naprawa testów na gałęzi roadmap"):
         _wyslij(f"Trwa {zdalny_kod.zajety()} — naprawę zacznę, gdy kliknisz jeszcze raz po jego końcu.")
         return
     nieudane = (stan["naprawa"] or {}).get("nieudane") or []
@@ -996,7 +1019,7 @@ def _napraw(stan):
 
 def _wznow(stan):
     zadanie = stan["zadanie"]
-    if not zdalny_kod.zarezerwuj(f"zadanie z roadmapy „{_skrot(zadanie['tytul'])}”"):
+    if not _zarezerwuj(f"zadanie z roadmapy „{_skrot(zadanie['tytul'])}”"):
         _wyslij(f"Trwa {zdalny_kod.zajety()} — wznowię, gdy klikniesz jeszcze raz po jego końcu.")
         return
     zadanie.update(stan="sprawdzam", od=time.time())
@@ -1062,6 +1085,7 @@ def _praca(tryb):
         wynik, blad, bledy = zdalny_kod.uruchom_claude_code(tresc, polecenie, KOPIA, LIMIT_ZADANIA_S,
                                                            przy_starcie=_zapamietaj_proces)
         _proces = None
+        _zwolnij()
         if _zatrzymaj.is_set():
             return          # Jarvis się zamyka — przy starcie zadanie będzie "przerwane"
         _po_claude(zadanie, wynik, blad, bledy, przed, time.time() - start)
@@ -1072,7 +1096,7 @@ def _praca(tryb):
         _przerwij("błąd po stronie Jarvisa (szczegóły w jarvis.log)")
     finally:
         _proces = None
-        zdalny_kod.zwolnij()
+        _zwolnij()
 
 
 def _przerwij(powod, przyciski=True):
@@ -1132,7 +1156,8 @@ def _po_claude(zadanie, wynik, blad, bledy, przed, czas):
             stan["zrobione"] = list(dict.fromkeys(stan["zrobione"] + [zadanie["tytul"]]))
             stan["pominiete"] = [t for t in stan["pominiete"] if t != zadanie["tytul"]]
         stan["historia"] = (stan["historia"] + [{
-            "tytul": zadanie["tytul"], "commit": commit, "kiedy": time.time(), "model": zadanie["model"],
+            "tytul": zadanie["tytul"], "numer": zadanie.get("numer"), "commit": commit, "kiedy": time.time(),
+            "model": zadanie["model"],
             "testy": testy["stan"], "opis_testow": testy["opis"], "naprawa": bool(zadanie.get("naprawa")),
             "scalone": False, "odrzucone": False}])[-200:]
         stan["zadanie"] = None
@@ -1156,7 +1181,7 @@ def _zatwierdz_zadanie(zadanie, wynik, testy, czas):
         try:
             with open(sciezka, encoding="utf-8", newline="") as plik:
                 tekst = plik.read()
-            nowy, znaleziono = oznacz_zrobione(tekst, zadanie["tytul"])
+            nowy, znaleziono = oznacz_zrobione(tekst, zadanie["tytul"], zadanie.get("numer"))
             if znaleziono:
                 with open(sciezka, "w", encoding="utf-8", newline="") as plik:
                     plik.write(nowy)
@@ -1170,7 +1195,8 @@ def _zatwierdz_zadanie(zadanie, wynik, testy, czas):
     if znaleziony:
         raise BladKodu(f"nie commituję — w pliku {znaleziony[0]} jest wartość klucza {znaleziony[1]}")
     podsumowanie = _skrot(str((wynik or {}).get("result") or ""), 1500)
-    wiadomosc = (f"Roadmapa: {zadanie['tytul']}\n\nModel: {konfiguracja.nazwa_modelu(zadanie['model'])}, "
+    numer = f"nr {zadanie['numer']} " if zadanie.get("numer") and not zadanie.get("naprawa") else ""
+    wiadomosc = (f"Roadmapa: {numer}{zadanie['tytul']}\n\nModel: {konfiguracja.nazwa_modelu(zadanie['model'])}, "
                  f"{zdalny_kod._czas(czas)}\nTesty: {testy['stan']} — {testy['opis']}"
                  + (f"\n\n{podsumowanie}" if podsumowanie else ""))
     _git("add", "-A", kopia=True)
@@ -1365,6 +1391,13 @@ def dalej():
             zaproponuj()
 
 
+def _nazwa_wpisu(wpis):
+    """Zadanie z historii do raportu: "nr 15 Treść" albo "naprawa testów"."""
+    if wpis.get("naprawa"):
+        return "naprawa testów"
+    return (f"nr {wpis['numer']} " if wpis.get("numer") else "") + wpis["tytul"]
+
+
 def status(raport=False, teraz=None):
     """Tekst /roadmapa status (i raportu dziennego — z tym, co zrobione od ostatniego)."""
     teraz = teraz or datetime.datetime.now(STREFA)
@@ -1378,7 +1411,7 @@ def status(raport=False, teraz=None):
         zrobione = [h for h in stan["historia"] if h["kiedy"] > od]
         if zrobione:
             czesci.append(f"Zrobione od ostatniego raportu ({len(zrobione)}):\n" + "\n".join(
-                f"• {'naprawa testów' if h.get('naprawa') else h['tytul']} — testy "
+                f"• {_nazwa_wpisu(h)} — testy "
                 f"{'✅' if h['testy'] == 'ok' else '❌' if h['testy'] == 'blad' else '—'}"
                 + (f", commit {h['commit']}" if h.get("commit") else "")
                 + (" (scalone)" if h.get("scalone") else " (odrzucone)" if h.get("odrzucone") else "")
@@ -1425,8 +1458,9 @@ def status(raport=False, teraz=None):
     except BladKodu:
         lista = []
     if lista:
-        czesci.append(f"W kolejce ({len(lista)}):\n" + "\n".join(
-            f"{n}. {_skrot(z.tytul, 70)} — {konfiguracja.nazwa_modelu(model_dla(z))}"
+        czesci.append(f"W kolejce ({len(lista)} nieukończonych):\n" + "\n".join(
+            f"{n}. {_etykieta(z)} {_skrot(z.tytul, 60)} — "
+            + (konfiguracja.nazwa_modelu(model_dla(z)) if model_dla(z) else "model do wyboru")
             + (" (część B — najpierw pytania)" if z.czesc == "B" else "")
             for n, z in enumerate(lista[:6], 1)) + (f"\n…i {len(lista) - 6} innych" if len(lista) > 6 else ""))
     else:

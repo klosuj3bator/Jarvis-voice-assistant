@@ -390,10 +390,15 @@ def zarezerwuj(opis):
         return True
 
 
-def zwolnij():
+def zwolnij(opis=None):
+    """
+    Zwalnia Claude Code zajęty przez roadmapę. Z `opis` — tylko gdy to wciąż
+    ta sama rezerwacja (żeby nie zwolnić cudzej, zrobionej w międzyczasie).
+    """
     global _inne
     with _blokada:
-        _inne = None
+        if opis is None or _inne == opis:
+            _inne = None
 
 
 def _wczytaj_zadania():

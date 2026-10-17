@@ -19,7 +19,7 @@ An Iron Man–style assistant you talk to in Polish. Say **"Hey Jarvis"** and sp
 - 📁 **Files** — folders and text/Markdown files on request ("zrób na pulpicie notatkę zakupy…"), listing, opening in Explorer, appending, editing with a preview, moving and copying ("wrzuć wszystkie PDF-y do folderu Faktury"). Only in allowed folders, never deleting; overwrites, edits and moving more than 5 files wait for your "tak"
 - 📱 **Telegram** — chat by text or voice note from your phone; reminders, mail alerts and screenshots come to you
 - 🛠️ **Remote Claude Code tasks** — `/kod <task>` lets Claude Code (Opus 5.5 by default, model set in Settings) edit Jarvis's own source in a sandbox, then runs the tests; `/zatwierdz` commits, `/cofnij` undoes, `/restart` rolls back automatically if the new version fails to start
-- 🗺️ **Roadmap mode** — Jarvis proposes the next task from `MapaZadan.md` on Telegram (what it touches, what it changes, which model) with **Accept / Skip / Show others** buttons. Accepted tasks run in Claude Code on a separate `roadmap` branch, get committed and tested, and the next proposal follows, always waiting for your click. Pauses when Claude Code runs out of usage and asks before continuing; daily report at noon; `/scal` merges into `main`
+- 🗺️ **Roadmap mode** — Jarvis takes the numbered tasks from `MapaZadan.md` in order and proposes the next one on Telegram (number, difficulty [Ł]/[Ś]/[T], task, model) with **Accept / Skip / Show others** buttons; Part B tasks first ask what Jarvis needs from you. Accepted tasks run in Claude Code on a separate `roadmap` branch, get committed and tested, and the next proposal follows, always waiting for your click. Pauses when Claude Code runs out of usage and asks before continuing; daily report at noon; `/scal` merges into `main`
 - 💫 **Iron Man HUD** — full-screen reactor reacting to state, live wallpaper mode, side panel on a second monitor
 
 ## 🧠 Architecture
@@ -66,26 +66,23 @@ Claude Code can only read and edit files in the project; from the shell it may r
 
 ### Roadmap mode
 
-Turn it on in Settings → **Ogólne**. Tasks live in `MapaZadan.md` (or `MapaZadan.txt`), split into parts by `# Część A` / `# Część B` headings; each task is a `## ` heading with optional fields:
+Turn it on in Settings → **Ogólne**. Tasks live in `MapaZadan.md` (or `MapaZadan.txt`). A task is a single **numbered line**: the number, the difficulty in square brackets and the text. A number in parentheses at the end points to an idea in `POMYSLY_JARVIS.md`. Headings (`##`, `###`) only group tasks and are never tasks; a heading with `CZĘŚĆ B` starts the tasks that need you.
 
 ```markdown
-# Część A
-## Tests for briefing.py
-- Trudność: łatwe          (easy; "trudne" = hard; unmarked counts as hard)
-- Dotyczy: briefing.py     (what it touches)
-- Zmieni: bugs caught by tests before you hear them in the morning   (what it changes)
+## CZĘŚĆ A — zadania do wykonania samodzielnie przez Claude Code
+### Etap 3. Rozmowa i głos
+15. [Ł] Dźwięk potwierdzenia ("bip") po wykryciu słowa aktywującego. (5)
 
-Free description — sent to Claude Code as the task.
-
-# Część B
-## A task that needs something from you
-- Potrzebne: what Jarvis needs from you (optional)
+## CZĘŚĆ B — zadania wymagające mojego udziału
+86. [Ś] Statystyki gier (League of Legends) — wymagany klucz Riot API. (67)
 ```
 
-- **Proposals** come in file order, with **Akceptuj / Pomiń / Pokaż inne** buttons and the model that will be used (easy → the "easy" model, Sonnet 5.5 by default; hard → Opus 5.5), which you can change before accepting. **Pomiń** moves the task to the end of the queue.
-- **Part B tasks never start on their own.** When one comes up, Jarvis first writes on Telegram what it needs from you: the `Potrzebne:` field, or else a read-only Claude Code pass over the code (Read/Glob/Grep, no edits). Then it waits. You answer by replying to that message, as many times as you like. Anything that looks like a password or key is refused, since keys go into Settings. The task starts only when you press **Zaczynaj**, with your answers included in the task.
+Difficulty picks the model: **[Ł]** easy and **[Ś]** medium → the "easy" model (Sonnet 5.5 by default), **[T]** hard → the "hard" model (Opus 5.5 by default). With no difficulty, Jarvis doesn't guess. It asks you to pick the model in the proposal.
+
+- **Proposals** come in file order and are short: *"Zadanie 1 ze 100 · nr 15 [Ł]"*, the task text and the model. The counter counts only unfinished tasks. Buttons: **Akceptuj / Pomiń / Pokaż inne / Zmień model**. **Pomiń** moves the task to the end of the queue.
+- **Part B tasks never start on their own.** They're marked *"wymaga Twojego udziału"*. When one comes up, Jarvis first writes on Telegram what it needs from you, found by a read-only Claude Code pass over the code (Read/Glob/Grep, no edits). Then it waits. You answer by replying to that message, as many times as you like. Anything that looks like a password or key is refused, since keys go into Settings. The task starts only when you press **Zaczynaj**, with your answers included in the task.
 - **Before a task starts**, there must be no uncommitted changes and the tests on `roadmap` must pass. Only one Claude Code task runs at a time.
-- **Each task** runs in a separate git worktree of the `roadmap` branch (`%APPDATA%\Jarvis\roadmapa`), so the folder Jarvis runs from stays on `main`. Jarvis then runs the tests, marks the task as done (`## [x]`) in `MapaZadan.md`, commits, and sends the summary, the changed files and the test result, followed by the next proposal. If the tests fail, it offers **Napraw testy** instead.
+- **Each task** runs in a separate git worktree of the `roadmap` branch (`%APPDATA%\Jarvis\roadmapa`), so the folder Jarvis runs from stays on `main`. Jarvis then runs the tests, marks the task as done in `MapaZadan.md` (`15. ✅ [Ł] …`), commits, and sends the summary, the changed files and the test result, followed by the next proposal. If the tests fail, it offers **Napraw testy** instead.
 - **Usage limits.** When Claude Code runs out of usage, Jarvis stops, keeps the unfinished changes, and messages you straight away. It reads the reset time from the message (otherwise it checks every 30 minutes) and asks *"Limity wróciły — kontynuujemy?"* before resuming the same Claude Code conversation.
 - **Daily report** at 12:00 (time set in Settings): what was done, the test result, what's next in the queue.
 - **Nothing reaches `main` without `/scal`**, and Jarvis never restarts itself — only `/scal` restarts it.
@@ -175,7 +172,7 @@ The suite in `tests/` (about 330 tests, ~1 min) covers:
 - the greeting window after startup: what counts as a greeting, the time limit, one answer and back to wake-word mode, the Nasłuch tab;
 - the wake word: custom `models/jarvis.onnx` with a fallback to "Hey Jarvis", the threshold from Settings, quiet listening that logs nothing;
 - the remote-coding commands;
-- roadmap mode on a throwaway git repository: parsing `MapaZadan.md`, the queue and skipping, model choice, a task committed on `roadmap` while `main` stays untouched, pre-start checks, usage limits (reading the reset time, waiting for your consent), `/scal` with a restart, `/odrzuc`, the daily report, Telegram buttons.
+- roadmap mode on a throwaway git repository: parsing `MapaZadan.md` (exactly 100 tasks with the right difficulties, on a frozen copy in `tests/dane/`), the queue and skipping, model choice, a task committed on `roadmap` while `main` stays untouched, pre-start checks, usage limits (reading the reset time, waiting for your consent), `/scal` with a restart, `/odrzuc`, the daily report, Telegram buttons.
 
 **Isolation.** The tests never touch your real files, keys or network:
 - data paths are redirected to a temporary folder;

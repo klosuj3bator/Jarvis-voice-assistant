@@ -1120,8 +1120,9 @@ class KreatorJarvisa(QDialog):
             formularz.addRow(etykieta, pole)
         uklad.addLayout(formularz)
         uklad.addWidget(self._etykieta(
-            "Trudność zadania jest w <code>MapaZadan.md</code> (<code>Trudność: łatwe</code> albo "
-            "<code>trudne</code>; bez oznaczenia — jak trudne). Model widać w propozycji na Telegramie "
+            "Trudność zadania jest w <code>MapaZadan.md</code>: <code>[Ł]</code> i <code>[Ś]</code> — "
+            "model do zadań łatwych, <code>[T]</code> — do trudnych; bez trudności Jarvis zapyta. "
+            "Model widać w propozycji na Telegramie "
             "i można go tam zmienić przed akceptacją. <b>/kod</b> zawsze bierze model do zadań trudnych.",
             "instrukcja", True))
 
