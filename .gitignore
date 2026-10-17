@@ -39,3 +39,12 @@ indeks_notatek/
 
 # Rejestr plików utworzonych przez Jarvisa (pliki.py) — nazwy Twoich plików
 pliki_jarvisa.json
+
+# Kalendarz Google przez API (google_kalendarz.py): klient OAuth i token — to klucze
+google_credentials.json
+google_token.json
+# Wydarzenia, o których Jarvis już przypomniał (kalendarz.py)
+kalendarz_przypomniane.json
+
+# Własny model słowa aktywującego (slowo_aktywujace.py) — bywa trenowany na Twoim głosie
+models/

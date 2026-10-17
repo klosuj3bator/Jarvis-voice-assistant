@@ -83,6 +83,21 @@ KOMENDY: ZDALNE PROGRAMOWANIE
 Opis w zdalny_kod.py i straznik.py. Komendy działają tylko jako TEKST od
 właściciela (głosówka nigdy nie jest komendą) i nie przechodzą przez agenta
 — model nie ma jak sam zlecić zadania Claude Code.
+
+
+ROADMAPA I PRZYCISKI
+====================
+
+    /roadmapa [status|dalej] — stan trybu roadmapy / następny krok
+    /scal                    — gałąź roadmap do main i restart ze strażnikiem
+    /odrzuc                  — porzucenie zmian z gałęzi roadmap
+
+Propozycje zadań z roadmapy mają przyciski (inline keyboard). Kliknięcie
+przychodzi jako "callback_query" — sprawdzane tak samo jak wiadomość:
+tylko właściciel, w jego czacie. Kliknięcia z PIERWSZEJ paczki po starcie
+pomijamy (punkt 4 — mogły czekać od wczoraj; Telegram nie podaje, kiedy
+kogoś kliknięto), a kliknięcia starych propozycji rozpoznaje roadmapa.py
+po identyfikatorze w przycisku. Opis trybu w roadmapa.py.
 """
 
 import io
@@ -165,18 +180,21 @@ def _to_stop(tekst):
     return re.sub(r"[^a-z]", "", (tekst or "").lower()) == "stop"
 
 
+_BEZ_POLSKICH = str.maketrans("ąćęłńóśźż", "acelnoszz")
+
+
 def _komenda(tekst):
     """
     "/kod popraw literówki" -> ("kod", "popraw literówki"), zwykły tekst -> (None, "").
 
     Telegram w grupach dokleja nazwę bota ("/kod@JarvisBot") — odcinamy ją.
-    "zatwierdź" z polską literą też rozumiemy.
+    "zatwierdź" i "odrzuć" z polskimi literami też rozumiemy.
     """
     dopasowanie = re.match(r"^/([A-Za-ząćęłńóśźżĄĆĘŁŃÓŚŹŻ_]+)(?:@\w+)?(?:\s+(.*))?$",
                            tekst.strip(), re.S)
     if not dopasowanie:
         return None, ""
-    nazwa = dopasowanie.group(1).lower().replace("ź", "z")
+    nazwa = dopasowanie.group(1).lower().translate(_BEZ_POLSKICH)
     return nazwa, (dopasowanie.group(2) or "").strip()
 
 
@@ -187,7 +205,11 @@ POMOC = ("Cześć! Pisz albo nagrywaj głosówki — przekażę je Jarvisowi. "
          "/zatwierdz [opis] — commit zmian z /kod\n"
          "/cofnij — wycofanie niezatwierdzonych zmian z /kod\n"
          "/restart — uruchomienie nowej wersji (przy nieprzechodzących testach "
-         "pyta o „tak”; wraca do działającej, gdyby nie wstała)")
+         "pyta o „tak”; wraca do działającej, gdyby nie wstała)\n\n"
+         "Roadmapa (MapaZadan.md, włączasz w Ustawieniach → Ogólne):\n"
+         "/roadmapa — stan, /roadmapa dalej — następny krok\n"
+         "/scal — zmiany z gałęzi roadmap do main i restart (z powrotem, gdyby nie wstała)\n"
+         "/odrzuc — porzucenie zmian z gałęzi roadmap")
 
 
 # Co zapisujemy w historii zamiast odpowiedzi, której nie wysłaliśmy.
@@ -218,6 +240,12 @@ def _na_probki_16k(dane):
     if not kawalki:
         return np.zeros(0, dtype=np.float32)
     return np.concatenate(kawalki).astype(np.float32)
+
+
+def _klawiatura(przyciski):
+    """[[("Akceptuj", "rm|a|x1")]] -> inline keyboard Telegrama (JSON)."""
+    return json.dumps({"inline_keyboard": [[{"text": napis, "callback_data": dane} for napis, dane in wiersz]
+                                           for wiersz in przyciski]}, ensure_ascii=False)
 
 
 class MostTelegram:
@@ -257,6 +285,9 @@ class MostTelegram:
         self._zatrzymaj = threading.Event()
         self._watek = None
         self._sesja = requests.Session()
+        # Pierwsza paczka po starcie — kliknięcia w niej mogły czekać od wczoraj
+        # (opis "ROADMAPA I PRZYCISKI" w nagłówku modułu).
+        self._pierwsza_paczka = True
 
         # "stop" — opis w nagłówku modułu. _biezace to flaga przerwania
         # odpowiedzi, która właśnie powstaje (None, gdy nic się nie dzieje).
@@ -305,9 +336,53 @@ class MostTelegram:
         except requests.RequestException as e:
             raise BladTelegrama(f"pobieranie pliku: {self._bez_tokenu(e)}") from None
 
-    def _wyslij_tekst(self, tekst):
-        for kawalek in _pociete(tekst, MAKS_DLUGOSC_WIADOMOSCI):
-            self._api("sendMessage", chat_id=self._wlasciciel, text=kawalek)
+    def _wyslij_tekst(self, tekst, przyciski=None):
+        """
+        Wysyła tekst (pocięty na kawałki). przyciski — wiersze par (napis, dane)
+        pod ostatnim kawałkiem. Zwraca identyfikator ostatniej wiadomości.
+        """
+        kawalki = _pociete(tekst, MAKS_DLUGOSC_WIADOMOSCI)
+        wynik = None
+        for numer, kawalek in enumerate(kawalki):
+            dodatki = {}
+            if przyciski and numer == len(kawalki) - 1:
+                dodatki["reply_markup"] = _klawiatura(przyciski)
+            wynik = self._api("sendMessage", chat_id=self._wlasciciel, text=kawalek, **dodatki)
+        return (wynik or {}).get("message_id")
+
+    # Dla roadmapa.py — "kanał": wysyła, podmienia i odpina przyciski. Błędy
+    # sieci tylko do dziennika: roadmapa ma działać dalej także bez internetu.
+
+    def wyslij(self, tekst, przyciski=None):
+        try:
+            return self._wyslij_tekst(tekst, przyciski)
+        except BladTelegrama as e:
+            logger.warning("[TELEGRAM] Nie wysłałem wiadomości roadmapy: %s", e)
+            return None
+
+    def edytuj(self, id_wiadomosci, tekst, przyciski=None):
+        try:
+            self._api("editMessageText", chat_id=self._wlasciciel, message_id=id_wiadomosci,
+                      text=tekst[:MAKS_DLUGOSC_WIADOMOSCI],
+                      reply_markup=_klawiatura(przyciski or []))
+        except BladTelegrama as e:
+            if "not modified" not in str(e):
+                logger.warning("[TELEGRAM] Nie podmieniłem wiadomości: %s", e)
+
+    def usun_przyciski(self, id_wiadomosci):
+        try:
+            self._api("editMessageReplyMarkup", chat_id=self._wlasciciel, message_id=id_wiadomosci,
+                      reply_markup=_klawiatura([]))
+        except BladTelegrama as e:
+            if "not modified" not in str(e):
+                logger.warning("[TELEGRAM] Nie odpiąłem przycisków: %s", e)
+
+    def zrestartuj(self, dopisek=""):
+        """Restart Jarvisa ze strażnikiem — dla /scal (roadmapa.py)."""
+        if self._restart is None:
+            self._wyslij_tekst("Restart z telefonu jest teraz niedostępny.")
+            return
+        self._zrestartuj(dopisek)
 
     def _wyslij_glos(self, tekst):
         """Wysyła odpowiedź jako głosówkę. Awaria syntezy nie jest błędem całości."""
@@ -339,12 +414,14 @@ class MostTelegram:
     # Obsługa wiadomości
     # ---------------------------------------------------------------
 
-    def _obsluz(self, aktualizacja):
+    def _obsluz(self, aktualizacja, pierwsza_paczka=False):
         """
         Jedna aktualizacja od Telegrama.
 
         Zwraca: "obca", "stara" albo None — do liczenia pominiętych.
         """
+        if aktualizacja.get("callback_query"):
+            return self._obsluz_klikniecie(aktualizacja["callback_query"], pierwsza_paczka)
         wiadomosc = aktualizacja.get("message")
         if not wiadomosc:
             return None     # edycje, reakcje itp. — nie obsługujemy
@@ -371,6 +448,27 @@ class MostTelegram:
             self._stop()
         else:
             self._kolejka.put(wiadomosc)
+        return None
+
+    def _obsluz_klikniecie(self, klikniecie, pierwsza_paczka):
+        """Kliknięty przycisk — te same zasady co wiadomość (nagłówek modułu)."""
+        nadawca = (klikniecie.get("from") or {}).get("id")
+        czat = ((klikniecie.get("message") or {}).get("chat") or {}).get("id")
+        if nadawca != self._wlasciciel or czat != self._wlasciciel:
+            logger.warning("[TELEGRAM] Odrzucam kliknięcie od obcego: nadawca %s, czat %s.", nadawca, czat)
+            return "obca"
+        # Odpowiedź od razu — inaczej przycisk "kręci się" w Telegramie.
+        stare = pierwsza_paczka
+        try:
+            self._api("answerCallbackQuery", callback_query_id=klikniecie["id"],
+                      **({"text": "Kliknięte, gdy Jarvis nie działał — kliknij jeszcze raz."}
+                         if stare else {}))
+        except BladTelegrama as e:
+            logger.warning("[TELEGRAM] %s", e)
+        if stare:
+            logger.info("[TELEGRAM] Pomijam kliknięcie z pierwszej paczki po starcie.")
+            return "stara"
+        self._kolejka.put({"przycisk": klikniecie})
         return None
 
     def _stop(self):
@@ -427,18 +525,34 @@ class MostTelegram:
 
     def _wykonaj(self, wiadomosc, przerwanie):
         """Jedna wiadomość z kolejki (już sprawdzona w _obsluz)."""
-        if "text" in wiadomosc:
-            self._obsluz_tekst(wiadomosc["text"], przerwanie, wiadomosc.get("date", 0))
+        if "przycisk" in wiadomosc:
+            klikniecie = wiadomosc["przycisk"]
+            if str(klikniecie.get("data") or "").startswith("rm|"):
+                import roadmapa
+
+                roadmapa.przycisk(klikniecie["data"], (klikniecie.get("message") or {}).get("message_id"))
+        elif "text" in wiadomosc:
+            self._obsluz_tekst(wiadomosc["text"], przerwanie, wiadomosc.get("date", 0),
+                               (wiadomosc.get("reply_to_message") or {}).get("message_id"))
         elif "voice" in wiadomosc or "audio" in wiadomosc:
             self._obsluz_glos(wiadomosc.get("voice") or wiadomosc["audio"], przerwanie)
         else:
             self._wyslij_tekst("Rozumiem tekst i wiadomości głosowe — tego jeszcze nie.")
 
-    def _obsluz_tekst(self, tekst, przerwanie, kiedy=0):
+    def _obsluz_tekst(self, tekst, przerwanie, kiedy=0, odpowiedz_na=None):
         tekst = tekst.strip()
 
         if self._obsluz_potwierdzenie(tekst):
             return
+
+        # Odpowiedź (Telegram: Odpowiedz) na pytania do zadania z Części B mapy
+        # zadań — trafia do roadmapy, nie do agenta (opis w roadmapa.py).
+        if odpowiedz_na is not None and not tekst.startswith("/"):
+            import roadmapa
+
+            if roadmapa.odpowiedz(odpowiedz_na, tekst):
+                logger.info("[TELEGRAM] Odpowiedź do zadania z Części B (%d znaków).", len(tekst))
+                return
 
         # Komendy (opis w nagłówku modułu). Reszta — np. /start przy pierwszym
         # uruchomieniu bota — dostaje listę komend.
@@ -446,6 +560,8 @@ class MostTelegram:
             nazwa, reszta = _komenda(tekst)
             if nazwa in ("kod", "zatwierdz", "cofnij", "restart"):
                 self._komenda_kodu(nazwa, reszta, kiedy)
+            elif nazwa in ("roadmapa", "scal", "odrzuc"):
+                self._komenda_roadmapy(nazwa, reszta, kiedy)
             else:
                 self._wyslij_tekst(POMOC)
             return
@@ -504,6 +620,18 @@ class MostTelegram:
             odpowiedz = f"⚠️ {e}"
         self._wyslij_tekst(odpowiedz)
 
+    def _komenda_roadmapy(self, nazwa, reszta, kiedy):
+        """/roadmapa, /scal, /odrzuc — opis w roadmapa.py. Odpowiedzi wysyła sama roadmapa."""
+        logger.info("[TELEGRAM] /%s %s", nazwa, reszta[:100])
+        # /scal restartuje Jarvisa — jak przy /restart nic sprzed startu tej kopii.
+        if nazwa == "scal" and kiedy and kiedy < int(self._start):
+            logger.info("[TELEGRAM] Pomijam /scal wysłane przed startem tej kopii.")
+            return
+        import roadmapa
+
+        self._status("typing")
+        roadmapa.komenda(nazwa, reszta)
+
     def _wynik_kodu(self, tekst):
         """Wynik zadania /kod — przychodzi z wątku zadania, gdy Claude Code skończy."""
         try:
@@ -519,8 +647,9 @@ class MostTelegram:
         if self._restart is None:
             self._wyslij_tekst("Restart z telefonu jest teraz niedostępny.")
             return
-        if zdalny_kod.trwa():
-            self._wyslij_tekst("Trwa zadanie /kod — restart przerwałby je w połowie. "
+        zajety = zdalny_kod.zajety()
+        if zajety:
+            self._wyslij_tekst(f"Trwa {zajety} — restart przerwałby je w połowie. "
                                "Napisz /restart, gdy przyjdzie wynik.")
             return
 
@@ -741,7 +870,7 @@ class MostTelegram:
 
         while not self._zatrzymaj.is_set():
             parametry = {"timeout": CZAS_POLLINGU_S,
-                         "allowed_updates": json.dumps(["message"])}
+                         "allowed_updates": json.dumps(["message", "callback_query"])}
             if self._offset is not None:
                 # offset = "potwierdzam wszystko przed tym numerem" — Telegram
                 # nie odda już tych wiadomości drugi raz.
@@ -759,10 +888,12 @@ class MostTelegram:
                 continue
 
             pominiete = 0
+            pierwsza_paczka, self._pierwsza_paczka = self._pierwsza_paczka, False
             for aktualizacja in aktualizacje:
                 self._offset = aktualizacja["update_id"] + 1
                 try:
-                    if self._obsluz(aktualizacja) == "stara":
+                    if self._obsluz(aktualizacja, pierwsza_paczka) == "stara" \
+                            and not aktualizacja.get("callback_query"):
                         pominiete += 1
                 except Exception:
                     # Błąd jednej wiadomości nie może zatrzymać mostu.

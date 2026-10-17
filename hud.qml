@@ -115,7 +115,15 @@ Item {
             hud.postepProcent = procent
             hud.postepOpis = opis
         }
+        function onKlucze(stan) {
+            hud.brakKluczy = stan.brak
+            hud.bezAnthropic = !stan.anthropic
+        }
     }
+
+    // Brakujące klucze API (gui.py, ustaw_klucze) — linijka po prawej.
+    property int brakKluczy: 0
+    property bool bezAnthropic: false
 
     // Postęp startu (rozruch.py) — pokazywany w stanie "uruchamianie".
     property int postepProcent: 0
@@ -575,6 +583,30 @@ Item {
                 font.family: hud.rodzina; font.pixelSize: hud.rozmiar * 0.8
                 text: odczyt.modelData.podpis; color: hud.blady
             }
+        }
+    }
+
+    // Prawa strona, pod odczytami: "KLUCZE API: BRAK 2". Kliknięcie otwiera
+    // Ustawienia na zakładce Klucze API (main.py). Bez klucza Anthropic —
+    // czerwona: bez niego nie ma rozmowy. Gdy wszystko ustawione, znika.
+    // Na tapecie HUD nie przyjmuje kliknięć — wtedy ta sama pozycja jest
+    // w menu ikony przy zegarku.
+    Text {
+        id: kluczeApi
+        visible: hud.brakKluczy > 0
+        x: hud.width - hud.margines - width - hud.wysuniecie - hud.uchwyt
+        y: hud.margines + Math.max(4, hud.odczyty.length) * hud.rozmiar * 3.6 + hud.rozmiar * 0.4
+        font.family: hud.rodzina; font.pixelSize: hud.rozmiar; font.letterSpacing: hud.rozmiar * 0.12
+        text: "KLUCZE API: BRAK " + hud.brakKluczy
+        color: hud.bezAnthropic ? "#ff5050" : hud.kolorZ(hud.akcentTekstu, 230 / 255)
+        opacity: wskazanieKluczy.containsMouse ? 1 : 0.85
+        MouseArea {
+            id: wskazanieKluczy
+            anchors.fill: parent
+            anchors.margins: -hud.rozmiar * 0.4      // łatwiej trafić
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: hud.most.otworzKlucze()
         }
     }
 

@@ -2,14 +2,20 @@
 #
 # Tylko to, czego testy naprawdę używają (sprawdzone 13.10 — lista modułów
 # wczytanych w trakcie całego zestawu). Bez modeli i ciężkich bibliotek:
-# Whispera, openWakeWord, onnxruntime, Qt, bibliotek audio i anthropic —
-# testy zastępują je atrapami (tests/atrapy.py), więc instalacja trwa chwilę.
+# Whispera, openWakeWord, onnxruntime, Qt i anthropic — testy zastępują je
+# atrapami (tests/atrapy.py), więc instalacja trwa chwilę.
 # Pełna lista do uruchamiania Jarvisa jest w requirements.txt.
+#
+# sounddevice (z wbudowanym PortAudio, kilkaset KB) jest tu tylko po to, żeby
+# dało się zaimportować wake_word_listener.py — testy nasłuchu (własny model
+# słowa aktywującego, próg, cichy nasłuch) używają atrap mikrofonu, żadnego
+# urządzenia audio nie otwierają.
 -r requirements-dev.txt
 numpy==2.5.2
 psutil==7.2.2
 python-dotenv==1.2.2
 pywin32==312
 requests==2.34.2
+sounddevice==0.5.6
 spotipy==2.26.0
 tzdata==2026.4

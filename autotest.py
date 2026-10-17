@@ -35,7 +35,7 @@ def uruchom(plik_wyniku):
         import schowek, setup_wizard, slownik, spotify_controller, stan_komputera  # noqa: F401,E401
         import system_control, telegram_bridge, tts, wake_word_listener  # noqa: F401,E401
         import akcje, panel, pasek_boczny, powitanie, rozruch, tapeta  # noqa: F401,E401
-        import straznik, zdalny_kod  # noqa: F401,E401
+        import roadmapa, straznik, zdalny_kod  # noqa: F401,E401
         return "wszystkie moduły Jarvisa się importują"
 
     def claude_code_tylko_z_telegrama():
@@ -44,8 +44,10 @@ def uruchom(plik_wyniku):
         # Bez inspect.getsource — w paczce z instalatora nie ma plików .py.
         import agent
         import zdalny_kod
-        if any(getattr(v, "__name__", "") == "zdalny_kod" for v in vars(agent).values()):
-            raise AssertionError("agent.py importuje zdalny_kod")
+        # Roadmapa (roadmapa.py) też uruchamia Claude Code — agent nie może znać żadnego z nich.
+        for modul in ("zdalny_kod", "roadmapa"):
+            if any(getattr(v, "__name__", "") == modul for v in vars(agent).values()):
+                raise AssertionError(f"agent.py importuje {modul}")
         nazwy = [n["name"] for n in agent.NARZEDZIA]
         podejrzane = [n for n in nazwy if "claude" in n.lower() or "kod" in n.lower()]
         if podejrzane:

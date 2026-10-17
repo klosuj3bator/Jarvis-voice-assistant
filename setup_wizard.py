@@ -49,11 +49,12 @@ import time
 from dataclasses import dataclass, field
 
 import requests
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPen
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame,
-                               QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                               QProgressBar, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
+                               QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+                               QMessageBox, QProgressBar, QPushButton, QSpinBox, QStackedWidget,
+                               QTimeEdit, QVBoxLayout, QWidget)
 
 import konfiguracja
 import modele
@@ -262,8 +263,17 @@ def sprawdz_gmail(w):
 
 
 def sprawdz_kalendarz(w):
-    """Pobiera plik kalendarza — adresu nigdy nie pokazujemy w komunikatach."""
+    """
+    Kalendarz działa przez Google Calendar API ("Połącz z Google") albo przez
+    adres iCal (zapas, tylko odczyt). Adresu iCal nigdy nie pokazujemy w komunikatach.
+    """
+    import google_kalendarz
+
     adres = w["GOOGLE_CALENDAR_ICAL_URL"]
+    if not adres:
+        if google_kalendarz.polaczony():
+            return True, "Połączony przez Google Calendar API (bez zapasowego adresu iCal)."
+        return False, "Kliknij „Połącz z Google” albo wpisz tajny adres iCal."
     if not adres.startswith("https://") or ".ics" not in adres:
         return False, "To nie wygląda na adres iCal — powinien zaczynać się od https:// i kończyć na .ics."
     if "/public/" in adres:
@@ -401,13 +411,16 @@ STRONY = [
         dodatkowe={zmienna: "" for zmienna in konfiguracja.STARE_KONTO_GMAIL}),
     Strona(
         "kalendarz", "Kalendarz Google",
-        "„Co mam jutro?”, „co mam w piątek?” — i dzisiejsze wydarzenia w porannym "
-        "briefingu. Tylko do odczytu.",
-        f"1. Otwórz {_link('https://calendar.google.com/calendar/r/settings', 'ustawienia Kalendarza Google')}.<br>"
-        "2. Po lewej wybierz swój kalendarz → <b>Integracja kalendarza</b>.<br>"
-        "3. Skopiuj <b>Tajny adres w formacie iCal</b>. Traktuj go jak hasło — "
-        "gdyby wyciekł, zresetujesz go w tym samym miejscu.",
-        [Pole("GOOGLE_CALENDAR_ICAL_URL", "Tajny adres iCal",
+        "„Co mam jutro?”, „dodaj rozmowę w piątek o 10” i przypomnienia przed "
+        "wydarzeniami. Usuwać wydarzeń Jarvis nie może.",
+        f"<b>Google Calendar API</b> (czytanie i dodawanie): w {_link('https://console.cloud.google.com/apis/library/calendar-json.googleapis.com', 'Google Cloud')} "
+        "włącz Calendar API, na <b>ekranie zgody OAuth</b> dodaj siebie jako testera, utwórz "
+        "<b>identyfikator klienta OAuth → Aplikacja komputerowa</b> i zapisz pobrany JSON jako "
+        f"<code>google_credentials.json</code> w <code>{os.path.dirname(konfiguracja.PLIK_GOOGLE_KLIENTA)}</code>. "
+        "Potem <b>Połącz z Google</b>.<br>"
+        f"<b>Zapas</b> (tylko odczyt): {_link('https://calendar.google.com/calendar/r/settings', 'ustawienia kalendarza')} "
+        "→ Integracja kalendarza → <b>Tajny adres w formacie iCal</b> — traktuj go jak hasło.",
+        [Pole("GOOGLE_CALENDAR_ICAL_URL", "Adres iCal (zapas)", wymagane=False,
               podpowiedz="https://calendar.google.com/calendar/ical/…/basic.ics")],
         sprawdz_kalendarz),
 ]
@@ -454,6 +467,13 @@ QComboBox {{
     font-family: Bahnschrift; font-size: 13px;
 }}
 QComboBox:focus {{ border: 1px solid {CYJAN}; }}
+QSpinBox, QDoubleSpinBox, QTimeEdit {{
+    background: rgba(10, 40, 56, 0.9); color: {BIALY};
+    border: 1px solid #1f6f94; border-radius: 3px; padding: 6px 10px;
+    font-family: Bahnschrift; font-size: 13px;
+}}
+QSpinBox:focus, QDoubleSpinBox:focus, QTimeEdit:focus {{ border: 1px solid {CYJAN}; }}
+QSpinBox:disabled, QTimeEdit:disabled {{ color: #2d5566; border-color: #1d3a47; }}
 QCheckBox {{ color: {BIALY}; font-family: Bahnschrift; font-size: 13px; spacing: 10px; }}
 QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid #1f6f94;
                         border-radius: 2px; background: rgba(10, 40, 56, 0.9); }}
@@ -471,6 +491,8 @@ QPushButton#glowny {{ background: rgba(86, 214, 255, 0.20); color: {BIALY};
                       border: 1px solid {CYJAN}; }}
 QPushButton#glowny:hover {{ background: rgba(86, 214, 255, 0.32); }}
 QPushButton#boczny {{ color: {BURSZTYN}; border-color: #9c7330; }}
+QPushButton#zakladka {{ padding: 5px 12px; color: #8fb3c4; border-color: #1f4a5c; }}
+QPushButton#zakladka:checked {{ color: {BIALY}; background: rgba(86, 214, 255, 0.18); border-color: {CYJAN}; }}
 QPushButton#boczny:hover {{ background: rgba(255, 186, 64, 0.10); }}
 QPushButton#oko {{ padding: 6px 10px; font-size: 11px; }}
 QPushButton:disabled {{ color: #2d5566; border-color: #1d3a47; background: transparent; }}
@@ -528,6 +550,7 @@ class _Sygnaly(QObject):
     wykryto = Signal(object)
     postep = Signal(object)
     pobrano = Signal(object)
+    google = Signal(object)          # (ok, komunikat) po "Połącz z Google"
 
 
 class StronaModeli(QWidget):
@@ -670,15 +693,17 @@ class KreatorJarvisa(QDialog):
     pierwsze=False — okno Ustawień (pola wypełnione obecnymi kluczami)
     """
 
-    def __init__(self, pierwsze=False, rodzic=None):
+    def __init__(self, pierwsze=False, rodzic=None, strona=None):
         super().__init__(rodzic)
         self._pierwsze = pierwsze
+        self._rozlacz_google = False     # "Wyłącz" na stronie kalendarza — usuń token przy zapisie
         self._zmiany = {}
         self._wyniki = {}          # funkcja -> "ok" / "pominieta" / "wylaczona"
         self._stop_wykrywania = threading.Event()
         self._sygnaly = _Sygnaly()
         self._sygnaly.sprawdzono.connect(self._po_sprawdzeniu)
         self._sygnaly.wykryto.connect(self._po_wykryciu)
+        self._sygnaly.google.connect(self._po_google)
 
         self.setObjectName("kreator")
         self.setStyleSheet(STYL)
@@ -718,14 +743,34 @@ class KreatorJarvisa(QDialog):
         linia.setObjectName("linia")
         uklad.addWidget(linia)
 
+        # Ustawienia mają zakładki (kreator pierwszego uruchomienia — nie):
+        # Klucze API (przegląd + strony kluczy), Ogólne, Tapeta, Panel boczny, Nasłuch, Podsumowanie.
+        self._zakladki = {}
+        if not pierwsze:
+            wiersz_zakladek = QHBoxLayout()
+            wiersz_zakladek.setSpacing(6)
+            for nazwa in ("Klucze API", "Ogólne", "Tapeta", "Panel boczny", "Nasłuch", "Podsumowanie"):
+                zakladka = QPushButton(nazwa)
+                zakladka.setObjectName("zakladka")
+                zakladka.setCheckable(True)
+                zakladka.clicked.connect(lambda _, n=nazwa: self._otworz_zakladke(n))
+                wiersz_zakladek.addWidget(zakladka)
+                self._zakladki[nazwa] = zakladka
+            wiersz_zakladek.addStretch()
+            uklad.addLayout(wiersz_zakladek)
+
         self._stos = QStackedWidget()
         uklad.addWidget(self._stos, 1)
 
         self._strony = []          # (Strona albo None, widget, słownik pól, status)
+        self._indeks_strony = {}   # funkcja ("anthropic", "kalendarz"…) -> numer strony
         self._modele = None
         if pierwsze:
             self._dodaj_powitanie()
+        else:
+            self._dodaj_przeglad_kluczy()
         for strona in STRONY:
+            self._indeks_strony[strona.funkcja] = self._stos.count()
             self._dodaj_strone(strona)
         # Wersja z instalatora bez pobranych modeli: strona pobierania przed
         # podsumowaniem, a samo pobieranie rusza od razu, w tle.
@@ -735,12 +780,107 @@ class KreatorJarvisa(QDialog):
         # dotyczy kluczy, a tapeta i tak startuje na głównym monitorze.
         self._wybor_monitora = None
         self._panel_wlaczony = None
+        self._powitanie_wlaczone = None
+        self._roadmapa_wlaczona = None
+        self._indeks_ogolnych = self._indeks_tapety = self._indeks_panelu = self._indeks_nasluchu = \
+            self._stos.count()
         if not pierwsze:
+            self._indeks_ogolnych = self._stos.count()
+            self._dodaj_strone_ogolna()
+            self._indeks_tapety = self._stos.count()
             self._dodaj_strone_tapety()
+            self._indeks_panelu = self._stos.count()
             self._dodaj_strone_panelu()
+            self._indeks_nasluchu = self._stos.count()
+            self._dodaj_strone_nasluchu()
         self._dodaj_podsumowanie()
 
-        self._stos.setCurrentIndex(0)
+        self._stos.currentChanged.connect(self._po_zmianie_strony)
+        self._stos.setCurrentIndex(0)        # w Ustawieniach to przegląd kluczy
+        if strona == "klucze" and "Klucze API" in self._zakladki:
+            self._otworz_zakladke("Klucze API")
+        self._po_zmianie_strony(self._stos.currentIndex())
+        self._odswiez_krok()
+
+    # --- zakładki (tylko Ustawienia) ---
+
+    def _poczatki_zakladek(self):
+        """Pierwsza strona każdej zakładki, w kolejności."""
+        return {"Klucze API": 0, "Ogólne": self._indeks_ogolnych, "Tapeta": self._indeks_tapety,
+                "Panel boczny": self._indeks_panelu, "Nasłuch": self._indeks_nasluchu,
+                "Podsumowanie": self._stos.count() - 1}
+
+    def _otworz_zakladke(self, nazwa):
+        # Zmiany z opuszczanej strony zapamiętujemy już teraz — inaczej
+        # przejście zakładką prosto do Podsumowania gubiłoby je (zapisywał
+        # je dopiero przycisk "Dalej").
+        self._zbierz_ustawienia()
+        self._stop_wykrywania.set()
+        self._stos.setCurrentIndex(self._poczatki_zakladek()[nazwa])
+        self._odswiez_krok()
+
+    def _po_zmianie_strony(self, indeks):
+        if self._zakladki:
+            zakladka = [nazwa for nazwa, poczatek in self._poczatki_zakladek().items()
+                        if indeks >= poczatek][-1]
+            for nazwa, przycisk in self._zakladki.items():
+                przycisk.setChecked(nazwa == zakladka)
+        if indeks == 0 and not self._pierwsze:
+            self._odswiez_przeglad()
+
+    def _stan_klucza(self, funkcja):
+        """(opis, kolor) dla przeglądu kluczy — z tym, co zmieniono w tym oknie."""
+        wynik = self._wyniki.get(funkcja)
+        if wynik == "ok":
+            return "ustawiony (zapisz na końcu)", CYJAN
+        if wynik == "wylaczona" or konfiguracja.wylaczona(funkcja):
+            return "wyłączony", BURSZTYN
+        if konfiguracja.skonfigurowana(funkcja):
+            return "ustawiony", CYJAN
+        if konfiguracja.FUNKCJE[funkcja].wymagana:
+            return "BRAK — bez niego Jarvis nie rozmawia", CZERWONY
+        return "brak", CZERWONY
+
+    def _dodaj_przeglad_kluczy(self):
+        widget = QWidget()
+        uklad = QVBoxLayout(widget)
+        uklad.setSpacing(12)
+        self._naglowek(uklad, "Klucze API")
+        uklad.addWidget(self._etykieta(
+            "Wymagany jest tylko klucz Anthropic — bez niego Jarvis nie rozmawia. Pozostałe "
+            "włączają poszczególne funkcje. Kliknij, żeby ustawić albo zmienić.", "opis"))
+        siatka = QGridLayout()
+        siatka.setHorizontalSpacing(14)
+        siatka.setVerticalSpacing(10)
+        self._przeglad = {}
+        for wiersz, strona in enumerate(STRONY):
+            nazwa = QLabel(strona.tytul)
+            nazwa.setObjectName("opis")
+            stan = QLabel()
+            stan.setObjectName("status")
+            przycisk = QPushButton("Ustaw")
+            przycisk.setObjectName("boczny")
+            przycisk.clicked.connect(lambda _, f=strona.funkcja: self._idz_do(f))
+            siatka.addWidget(nazwa, wiersz, 0)
+            siatka.addWidget(stan, wiersz, 1)
+            siatka.addWidget(przycisk, wiersz, 2)
+            self._przeglad[strona.funkcja] = (stan, przycisk)
+        siatka.setColumnStretch(1, 1)
+        uklad.addLayout(siatka)
+        uklad.addStretch()
+        uklad.addLayout(self._przyciski(dalej=("Dalej", self._dalej)))
+        self._stos.addWidget(widget)
+        self._strony.append((None, widget, {}, None))
+
+    def _odswiez_przeglad(self):
+        for funkcja, (stan, przycisk) in self._przeglad.items():
+            opis, kolor = self._stan_klucza(funkcja)
+            stan.setText(opis)
+            stan.setStyleSheet(f"color: {kolor};")
+            przycisk.setText("Zmień" if kolor == CYJAN else "Ustaw")
+
+    def _idz_do(self, funkcja):
+        self._stos.setCurrentIndex(self._indeks_strony[funkcja])
         self._odswiez_krok()
 
     # --- budowa stron ---
@@ -849,6 +989,8 @@ class KreatorJarvisa(QDialog):
                 wykryj.setObjectName("boczny")
                 wykryj.clicked.connect(self._wykryj_id)
                 wiersz.addWidget(wykryj)
+            if pole.zmienna == "GOOGLE_CALENDAR_ICAL_URL":
+                self._dodaj_wiersz_google(formularz)
             pola[pole.zmienna] = wpis
             if indeks < w_siatce:
                 siatka.addLayout(wiersz, indeks // strona.kolumny + 1, indeks % strona.kolumny + 1)
@@ -910,6 +1052,101 @@ class KreatorJarvisa(QDialog):
         self._strony.append((None, widget, {}, None))
         self._modele.start()
 
+    def _sekcja(self, uklad, tytul):
+        etykieta = QLabel(tytul)
+        etykieta.setObjectName("etykieta")
+        etykieta.setFont(_czcionka_rozstrzelona(9, 2))
+        uklad.addSpacing(4)
+        uklad.addWidget(etykieta)
+
+    def _wybor_modelu(self, trudnosc):
+        """Lista modeli Claude Code; model spoza listy (np. wpisany w .env) też się pokaże."""
+        wybor = QComboBox()
+        for model, nazwa in konfiguracja.MODELE_CLAUDE_CODE:
+            wybor.addItem(nazwa, model)
+        obecny = konfiguracja.model_claude(trudnosc)
+        if wybor.findData(obecny) < 0:
+            wybor.addItem(obecny, obecny)
+        wybor.setCurrentIndex(wybor.findData(obecny))
+        return wybor
+
+    # Etykiety pól na stronie Ogólne — jedna szerokość dla obu sekcji.
+    SZEROKOSC_ETYKIET_OGOLNYCH = 150
+
+    def _dodaj_strone_ogolna(self):
+        """Tryb roadmapy (roadmapa.py) i modele Claude Code (/kod, roadmapa)."""
+        widget = QWidget()
+        uklad = QVBoxLayout(widget)
+        uklad.setSpacing(10)
+        self._naglowek(uklad, "Ogólne")
+
+        self._sekcja(uklad, "ROADMAPA")
+        self._roadmapa_wlaczona = QCheckBox("Ciągła praca nad roadmapą — propozycje zadań z MapaZadan.md "
+                                            "na Telegramie")
+        self._roadmapa_wlaczona.setChecked(konfiguracja.roadmapa_wlaczona())
+        uklad.addWidget(self._roadmapa_wlaczona)
+        self._raport_roadmapy = QTimeEdit()
+        self._raport_roadmapy.setDisplayFormat("HH:mm")
+        self._raport_roadmapy.setTime(QTime(*konfiguracja.raport_roadmapy()))
+        formularz = QFormLayout()
+        formularz.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        etykieta = QLabel("CODZIENNY RAPORT")
+        etykieta.setObjectName("etykieta")
+        etykieta.setFont(_czcionka_rozstrzelona(8, 1.5))
+        etykieta.setMinimumWidth(self.SZEROKOSC_ETYKIET_OGOLNYCH)       # pola obu sekcji w jednej linii
+        etykieta.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        formularz.addRow(etykieta, self._raport_roadmapy)
+        uklad.addLayout(formularz)
+        uwaga = ("" if konfiguracja.skonfigurowana("telegram") else
+                 f'<br><span style="color:{BURSZTYN};">Najpierw ustaw Telegram (Klucze API) — '
+                 "bez niego roadmapa nie ma jak pytać.</span>")
+        uklad.addWidget(self._etykieta(
+            "Jarvis proponuje na Telegramie kolejne zadanie z <code>MapaZadan.md</code>; po Twoim "
+            "<b>Akceptuj</b> robi je przez Claude Code na gałęzi <b>roadmap</b>. Do <b>main</b> "
+            "zmiany trafiają dopiero po komendzie <b>/scal</b>, a Jarvisa nigdy nie restartuje sam. "
+            "Potrzebny Git, Claude Code i Jarvis uruchamiany z kodu." + uwaga, "instrukcja", True))
+
+        self._sekcja(uklad, "CLAUDE CODE")
+        self._model_trudne = self._wybor_modelu("trudne")
+        self._model_latwe = self._wybor_modelu("latwe")
+        formularz = QFormLayout()
+        formularz.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        for opis, pole in (("ZADANIA TRUDNE", self._model_trudne), ("ZADANIA ŁATWE", self._model_latwe)):
+            etykieta = QLabel(opis)
+            etykieta.setObjectName("etykieta")
+            etykieta.setFont(_czcionka_rozstrzelona(8, 1.5))
+            etykieta.setMinimumWidth(self.SZEROKOSC_ETYKIET_OGOLNYCH)
+            etykieta.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            formularz.addRow(etykieta, pole)
+        uklad.addLayout(formularz)
+        uklad.addWidget(self._etykieta(
+            "Trudność zadania jest w <code>MapaZadan.md</code> (<code>Trudność: łatwe</code> albo "
+            "<code>trudne</code>; bez oznaczenia — jak trudne). Model widać w propozycji na Telegramie "
+            "i można go tam zmienić przed akceptacją. <b>/kod</b> zawsze bierze model do zadań trudnych.",
+            "instrukcja", True))
+
+        uklad.addStretch()
+        uklad.addLayout(self._przyciski(wstecz=True, dalej=("Dalej", self._dalej_z_ogolnych)))
+        self._stos.addWidget(widget)
+        self._strony.append((None, widget, {}, None))
+
+    def _dalej_z_ogolnych(self):
+        self._zbierz_ogolne()
+        self._dalej()
+
+    def _zbierz_ogolne(self):
+        godzina, minuta = konfiguracja.raport_roadmapy()
+        self._zapamietaj({
+            konfiguracja.ROADMAPA: ("1" if self._roadmapa_wlaczona.isChecked() else "0",
+                                    "1" if konfiguracja.roadmapa_wlaczona() else "0"),
+            konfiguracja.ROADMAPA_RAPORT: (self._raport_roadmapy.time().toString("HH:mm"),
+                                           f"{godzina:02d}:{minuta:02d}"),
+            konfiguracja.CLAUDE_MODEL_TRUDNE: (self._model_trudne.currentData(),
+                                               konfiguracja.model_claude("trudne")),
+            konfiguracja.CLAUDE_MODEL_LATWE: (self._model_latwe.currentData(),
+                                              konfiguracja.model_claude("latwe")),
+        })
+
     def _dodaj_strone_tapety(self):
         """Wybór monitora dla trybu tapety (opis trybu w gui.py i tapeta.py)."""
         widget = QWidget()
@@ -949,12 +1186,34 @@ class KreatorJarvisa(QDialog):
         self._strony.append((None, widget, {}, None))
 
     def _dalej_z_tapety(self):
-        wybrany = self._wybor_monitora.currentData()
-        if wybrany != konfiguracja.monitor_tapety():
-            self._zmiany[konfiguracja.MONITOR_TAPETY] = wybrany
-        else:
-            self._zmiany.pop(konfiguracja.MONITOR_TAPETY, None)
+        self._zbierz_tapete()
         self._dalej()
+
+    def _zbierz_tapete(self):
+        self._zapamietaj({konfiguracja.MONITOR_TAPETY: (self._wybor_monitora.currentData(),
+                                                        konfiguracja.monitor_tapety())})
+
+    def _zapamietaj(self, nowe):
+        """
+        nowe — {ZMIENNA: (wartość w oknie, wartość obecna)}. Do zmian trafia
+        tylko to, co naprawdę się różni; powrót do obecnej wartości zmianę cofa.
+        """
+        for zmienna, (nowa, obecna) in nowe.items():
+            if nowa != obecna:
+                self._zmiany[zmienna] = nowa
+            else:
+                self._zmiany.pop(zmienna, None)
+
+    def _zbierz_ustawienia(self):
+        """Zmiany ze stron Ogólne, Tapeta, Panel boczny i Nasłuch (są tylko w Ustawieniach)."""
+        if self._roadmapa_wlaczona is not None:
+            self._zbierz_ogolne()
+        if self._wybor_monitora is not None:
+            self._zbierz_tapete()
+        if self._panel_wlaczony is not None:
+            self._zbierz_panel()
+        if self._powitanie_wlaczone is not None:
+            self._zbierz_nasluch()
 
     # Opisy elementów panelu na stronie Ustawień (kolejność: konfiguracja.ELEMENTY_PANELU).
     OPISY_ELEMENTOW = {
@@ -1033,7 +1292,10 @@ class KreatorJarvisa(QDialog):
         self._strony.append((None, widget, {}, None))
 
     def _dalej_z_panelu(self):
-        """Do zmian trafia tylko to, co naprawdę się zmieniło."""
+        self._zbierz_panel()
+        self._dalej()
+
+    def _zbierz_panel(self):
         elementy = [e for e, pole in self._panel_elementy.items() if pole.isChecked()]
         nowe = {
             konfiguracja.PANEL: ("1" if self._panel_wlaczony.isChecked() else "0",
@@ -1048,12 +1310,87 @@ class KreatorJarvisa(QDialog):
                                                  "1" if konfiguracja.panel_2_ekrany() else "0")
             nowe[konfiguracja.PANEL_MONITOR] = (self._panel_monitor.currentData(), konfiguracja.panel_monitor())
             nowe[konfiguracja.PANEL_KRAWEDZ] = (self._panel_krawedz.currentData(), konfiguracja.panel_krawedz())
-        for zmienna, (nowa, obecna) in nowe.items():
-            if nowa != obecna:
-                self._zmiany[zmienna] = nowa
-            else:
-                self._zmiany.pop(zmienna, None)
+        self._zapamietaj(nowe)
+
+    def _dodaj_strone_nasluchu(self):
+        """
+        Powitanie po starcie (powitanie_startowe.py) i słowo aktywujące
+        (slowo_aktywujace.py): własny model i próg czułości.
+        """
+        import slowo_aktywujace
+
+        widget = QWidget()
+        uklad = QVBoxLayout(widget)
+        uklad.setSpacing(10)
+        self._naglowek(uklad, "Nasłuch")
+
+        self._powitanie_wlaczone = QCheckBox("Po uruchomieniu czekaj na powitanie — bez „Hey Jarvis”")
+        self._powitanie_wlaczone.setChecked(konfiguracja.powitanie_po_starcie())
+        uklad.addWidget(self._powitanie_wlaczone)
+        uklad.addWidget(self._etykieta(
+            "Przez kilka minut po starcie wystarczy powiedzieć „hej, wróciłem”, „cześć Jarvis” albo "
+            "„jestem”: Jarvis przywita Cię z najważniejszymi informacjami i przejdzie w zwykły tryb "
+            "z „Hey Jarvis”. Inne rozmowy w tym czasie pomija i nie zapisuje ich treści. "
+            "Zmiana działa od następnego uruchomienia.", "instrukcja"))
+
+        self._okno_powitania = QSpinBox()
+        self._okno_powitania.setRange(1, konfiguracja.MAKS_OKNO_POWITANIA_MIN)
+        self._okno_powitania.setSuffix(" min")
+        self._okno_powitania.setValue(konfiguracja.okno_powitania_min())
+        self._okno_powitania.setEnabled(self._powitanie_wlaczone.isChecked())
+        self._powitanie_wlaczone.toggled.connect(self._okno_powitania.setEnabled)
+
+        # Próg: 0 w polu = "automatycznie", czyli domyślny dla modelu.
+        wlasny = slowo_aktywujace.wlasny_model() is not None
+        domyslny = slowo_aktywujace.PROG_WLASNEGO if wlasny else slowo_aktywujace.PROG_WBUDOWANEGO
+        self._prog_wake_worda = QDoubleSpinBox()
+        self._prog_wake_worda.setRange(0.0, slowo_aktywujace.PROG_MAKS)
+        self._prog_wake_worda.setSingleStep(0.05)
+        self._prog_wake_worda.setDecimals(2)
+        self._prog_wake_worda.setSpecialValueText(f"automatycznie ({domyslny:.2f})")
+        self._prog_wake_worda.setValue(konfiguracja.prog_wake_worda() or 0.0)
+
+        formularz = QFormLayout()
+        formularz.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        for opis, pole in (("CZAS NA POWITANIE", self._okno_powitania),
+                           ("PRÓG CZUŁOŚCI", self._prog_wake_worda)):
+            etykieta = QLabel(opis)
+            etykieta.setObjectName("etykieta")
+            etykieta.setFont(_czcionka_rozstrzelona(8, 1.5))
+            formularz.addRow(etykieta, pole)
+        uklad.addLayout(formularz)
+
+        folder = os.path.dirname(os.path.dirname(slowo_aktywujace.PLIK_WLASNEGO_MODELU))
+        model = ("<b>Słowo aktywujące:</b> własny model <code>models\\jarvis.onnx</code>. "
+                 "Po podmianie pliku uruchom Jarvisa ponownie." if wlasny else
+                 "<b>Słowo aktywujące:</b> wbudowane „Hey Jarvis”. Własny model zapisz jako "
+                 f"<code>models\\jarvis.onnx</code> w <code>{folder}</code> i uruchom Jarvisa ponownie.")
+        uklad.addWidget(self._etykieta(
+            model + "<br><b>Próg czułości:</b> niższy — łatwiej zawołać Jarvisa, ale częściej "
+            "odezwie się sam; wyższy — rzadziej się myli, ale trzeba mówić wyraźniej. "
+            "Zmiana progu działa od razu.", "instrukcja", True))
+
+        uklad.addStretch()
+        uklad.addLayout(self._przyciski(wstecz=True, dalej=("Dalej", self._dalej_z_nasluchu)))
+        self._stos.addWidget(widget)
+        self._strony.append((None, widget, {}, None))
+
+    def _dalej_z_nasluchu(self):
+        self._zbierz_nasluch()
         self._dalej()
+
+    def _zbierz_nasluch(self):
+        prog = self._prog_wake_worda.value()
+        obecny = konfiguracja.prog_wake_worda()
+        self._zapamietaj({
+            konfiguracja.POWITANIE_PO_STARCIE: ("1" if self._powitanie_wlaczone.isChecked() else "0",
+                                                "1" if konfiguracja.powitanie_po_starcie() else "0"),
+            konfiguracja.OKNO_POWITANIA: (str(self._okno_powitania.value()),
+                                          str(konfiguracja.okno_powitania_min())),
+            # Pusta wartość = automatycznie (konfiguracja.prog_wake_worda).
+            konfiguracja.PROG_WAKE_WORDA: (f"{prog:.2f}" if prog > 0 else "",
+                                           f"{obecny:.2f}" if obecny is not None else ""),
+        })
 
     def _dodaj_podsumowanie(self):
         widget = QWidget()
@@ -1124,6 +1461,8 @@ class KreatorJarvisa(QDialog):
             self._zmiany[pole.zmienna] = ""
         self._zmiany.update(strona.dodatkowe)
         self._wyniki[strona.funkcja] = "wylaczona"
+        if strona.funkcja == "kalendarz":
+            self._rozlacz_google = True
         self._dalej()
 
     def _status(self, status, tekst, kolor):
@@ -1195,6 +1534,46 @@ class KreatorJarvisa(QDialog):
 
         threading.Thread(target=praca, name="kreator-telegram", daemon=True).start()
 
+    def _dodaj_wiersz_google(self, formularz):
+        """Stan połączenia z Google Calendar API i przycisk "Połącz z Google"."""
+        import google_kalendarz
+
+        wiersz = QHBoxLayout()
+        self._stan_google = QLabel(google_kalendarz.stan())
+        self._stan_google.setObjectName("opis")
+        wiersz.addWidget(self._stan_google, 1)
+        polacz = QPushButton("Połącz z Google")
+        polacz.setObjectName("boczny")
+        polacz.clicked.connect(self._polacz_google)
+        wiersz.addWidget(polacz)
+        etykieta = QLabel("GOOGLE CALENDAR API")
+        etykieta.setObjectName("etykieta")
+        etykieta.setFont(_czcionka_rozstrzelona(8, 1.5))
+        formularz.addRow(etykieta, wiersz)
+
+    def _polacz_google(self):
+        """Logowanie OAuth w przeglądarce — tylko na Twoje kliknięcie (google_kalendarz.py)."""
+        import google_kalendarz
+
+        strona, widget, pola, status = self._biezaca()
+        self._status(status, "Otwieram przeglądarkę — zaloguj się w Google i zezwól na dostęp "
+                             "do kalendarza (czekam do 3 minut)…", BURSZTYN)
+        self._zablokuj(widget, True)
+        threading.Thread(target=lambda: self._sygnaly.google.emit(google_kalendarz.autoryzuj()),
+                         name="kreator-google", daemon=True).start()
+
+    def _po_google(self, wynik):
+        import google_kalendarz
+
+        ok, komunikat = wynik
+        strona, widget, pola, status = self._strony[self._indeks_strony["kalendarz"]]
+        self._zablokuj(widget, False)
+        self._stan_google.setText(google_kalendarz.stan())
+        self._status(status, ("✓ " if ok else "") + komunikat + (" Teraz „Sprawdź i dalej”." if ok else ""),
+                     CYJAN if ok else CZERWONY)
+        if ok:
+            self._rozlacz_google = False
+
     def _po_wykryciu(self, wynik):
         identyfikator, komunikat = wynik
         strona, widget, pola, status = self._biezaca()
@@ -1209,6 +1588,7 @@ class KreatorJarvisa(QDialog):
     # --- koniec ---
 
     def _odswiez_podsumowanie(self):
+        self._zbierz_ustawienia()
         wiersze = []
         for strona in STRONY:
             wynik = self._wyniki.get(strona.funkcja)
@@ -1227,6 +1607,15 @@ class KreatorJarvisa(QDialog):
             opis, kolor = (("pobrane", CYJAN) if self._modele.skonczone
                            else ("jeszcze się pobierają — wróć o krok", BURSZTYN))
             wiersze.append(f'<span style="color:{kolor};">■</span>&nbsp; <b>Modele mowy</b> — {opis}')
+        if self._roadmapa_wlaczona is not None:
+            opis = (f"roadmapa włączona, raport o {self._raport_roadmapy.time().toString('HH:mm')}"
+                    if self._roadmapa_wlaczona.isChecked() else "roadmapa wyłączona")
+            opis += (f"; Claude Code: {self._model_trudne.currentText()} (trudne), "
+                     f"{self._model_latwe.currentText()} (łatwe)")
+            zmiana = bool({konfiguracja.ROADMAPA, konfiguracja.ROADMAPA_RAPORT, konfiguracja.CLAUDE_MODEL_TRUDNE,
+                           konfiguracja.CLAUDE_MODEL_LATWE} & set(self._zmiany))
+            wiersze.append(f'<span style="color:{CYJAN if zmiana else NIEBIESKI};">■</span>&nbsp; '
+                           f'<b>Ogólne</b> — {opis}{"" if zmiana else " (bez zmian)"}')
         if self._wybor_monitora is not None:
             opis = self._wybor_monitora.currentText().split(" — ")[0]
             zmiana = konfiguracja.MONITOR_TAPETY in self._zmiany
@@ -1244,6 +1633,14 @@ class KreatorJarvisa(QDialog):
                          for z in self._zmiany)
             wiersze.append(f'<span style="color:{CYJAN if zmiana else NIEBIESKI};">■</span>&nbsp; '
                            f'<b>Panel boczny</b> — {opis}{"" if zmiana else " (bez zmian)"}')
+        if self._powitanie_wlaczone is not None:
+            opis = (f"powitanie po starcie przez {self._okno_powitania.value()} min"
+                    if self._powitanie_wlaczone.isChecked() else "bez powitania po starcie")
+            opis += f", próg {self._prog_wake_worda.text()}"
+            zmiana = bool({konfiguracja.POWITANIE_PO_STARCIE, konfiguracja.OKNO_POWITANIA,
+                           konfiguracja.PROG_WAKE_WORDA} & set(self._zmiany))
+            wiersze.append(f'<span style="color:{CYJAN if zmiana else NIEBIESKI};">■</span>&nbsp; '
+                           f'<b>Nasłuch</b> — {opis}{"" if zmiana else " (bez zmian)"}')
         self._podsumowanie.setText("<br>".join(wiersze))
 
     def _ma_anthropic(self):
@@ -1252,16 +1649,22 @@ class KreatorJarvisa(QDialog):
                         and self._zmiany.get("ANTHROPIC_API_KEY", None) != ""))
 
     def _zakoncz(self):
-        if not self._ma_anthropic():
+        # Kreator pierwszego uruchomienia wymaga klucza; w Ustawieniach można
+        # zapisać resztę bez niego — Jarvis działa, tylko nie rozmawia, a na
+        # HUD-zie świeci się czerwona linijka "Klucze API".
+        if self._pierwsze and not self._ma_anthropic():
             QMessageBox.warning(self, "Brakuje klucza",
-                                "Bez klucza Anthropic Jarvis nie wystartuje — wróć do tej strony.")
+                                "Bez klucza Anthropic Jarvis nie rozmawia — wróć do tej strony.")
             return
         if self._modele is not None and not self._modele.skonczone:
             QMessageBox.information(self, "Jeszcze chwila",
                                     "Modele mowy jeszcze się pobierają — bez nich Jarvis "
                                     "nie usłyszy „Hey Jarvis”. Postęp widać o krok wcześniej.")
             return
+        self._zbierz_ustawienia()
         konfiguracja.zapisz(self._zmiany)
+        if self._rozlacz_google and os.path.exists(konfiguracja.PLIK_GOOGLE_TOKENU):
+            os.remove(konfiguracja.PLIK_GOOGLE_TOKENU)      # własny token Jarvisa, nie Twoje dane
         self.accept()
 
     def done(self, wynik):
@@ -1321,16 +1724,19 @@ def pobierz_modele(rodzic=None):
     return OknoModeli(rodzic).exec() == QDialog.Accepted
 
 
-def uruchom_kreator(pierwsze=False, rodzic=None):
+def uruchom_kreator(pierwsze=False, rodzic=None, strona=None):
     """
     Pokazuje kreator (pierwsze=True) albo okno Ustawień i czeka na zamknięcie.
     Wymaga istniejącego QApplication (main.py go ma).
+
+    strona="klucze" — Ustawienia od razu na zakładce Klucze API (linijka
+    "Klucze API: brak N" na HUD-zie, main.py).
 
     Zwraca: słownik zapisanych zmian {"ZMIENNA": wartość} — pusty, gdy
     zamknięto okno bez zapisu albo niczego nie zmieniono. main.py patrzy
     po nazwach, czy potrzebny jest restart (konfiguracja.BEZ_RESTARTU).
     """
-    okno = KreatorJarvisa(pierwsze=pierwsze, rodzic=rodzic)
+    okno = KreatorJarvisa(pierwsze=pierwsze, rodzic=rodzic, strona=strona)
     if okno.exec() != QDialog.Accepted:
         return {}
     return dict(okno._zmiany)

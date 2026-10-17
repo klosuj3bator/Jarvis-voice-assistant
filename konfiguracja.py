@@ -32,6 +32,7 @@ to miejsce, które Windows przeznacza na dane programów konkretnego
 użytkownika — inni użytkownicy tego komputera do niego nie zajrzą.
 """
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -162,7 +163,51 @@ def skonfigurowana(funkcja):
     """Czy funkcja ma komplet niepustych kluczy."""
     if funkcja == "gmail":
         return bool(konta_gmail())          # wystarczy jedno konto (opis niżej)
+    if funkcja == "kalendarz" and _token_google_wazny():
+        return True                         # połączony przez Google Calendar API (kalendarz.py)
     return all(wartosc(z).strip() for z in FUNKCJE[funkcja].zmienne)
+
+
+# Kalendarz Google przez API (google_kalendarz.py): plik klienta OAuth z Google
+# Cloud i token zapisany po połączeniu. Oba są w .gitignore i nigdy nie
+# trafiają do paczki instalatora (instalator/sprawdz_paczke.py).
+PLIK_GOOGLE_KLIENTA = sciezki.dane("google_credentials.json")
+PLIK_GOOGLE_TOKENU = sciezki.dane("google_token.json")
+
+# Po której zmiennej poznać, że funkcję WYŁĄCZYŁEŚ w Ustawieniach (zapisany
+# pusty klucz) — a nie, że po prostu jej jeszcze nie ustawiłeś.
+_ZMIENNE_WYLACZENIA = {"anthropic": ("ANTHROPIC_API_KEY",), "spotify": ("SPOTIPY_CLIENT_ID",),
+                       "telegram": ("TELEGRAM_JARVIS_TOKEN",),
+                       "gmail": ("GMAIL_1_ADDRESS", "GMAIL_ADDRESS"),
+                       "kalendarz": ("GOOGLE_CALENDAR_ICAL_URL",)}
+
+
+def _token_google_wazny():
+    """Czy jest token Google Calendar API, którego Google nie unieważnił (google_kalendarz.py)."""
+    try:
+        with open(PLIK_GOOGLE_TOKENU, encoding="utf-8") as plik:
+            token = json.load(plik)
+        return bool(token.get("refresh_token")) and not token.get("wygasl")
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def wylaczona(funkcja):
+    """Czy funkcję świadomie wyłączono w Ustawieniach ("Wyłącz" zapisuje pusty klucz)."""
+    if funkcja == "anthropic" or skonfigurowana(funkcja) or not os.path.exists(PLIK):
+        return False
+    zapisane = dotenv_values(PLIK)
+    return any(z in zapisane and not (zapisane[z] or "").strip()
+               for z in _ZMIENNE_WYLACZENIA.get(funkcja, ()))
+
+
+def brakujace_klucze():
+    """
+    Funkcje bez kluczy, poza świadomie wyłączonymi — dla linijki "Klucze API:
+    brak N" na HUD-zie (gui.py). Anthropic zawsze pierwszy: bez niego nie ma
+    rozmowy, więc HUD pokazuje wtedy linijkę na czerwono.
+    """
+    return [f for f in FUNKCJE if not skonfigurowana(f) and not wylaczona(f)]
 
 
 # ---------------------------------------------------------------
@@ -282,6 +327,123 @@ DOMYSLNE_ELEMENTY = ("rozmowa", "dzien", "spotify")
 # nie trzeba uruchamiać Jarvisa ponownie.
 BEZ_RESTARTU = {TRYB_SLUCHAWEK, TRYB_TAPETY, MONITOR_TAPETY, PANEL, PANEL_2_EKRANY,
                 PANEL_MONITOR, PANEL_KRAWEDZ, PANEL_ELEMENTY, POGODA_MIASTO}
+
+# Ile minut przed wydarzeniem z kalendarza Jarvis o nim przypomina (głos
+# i Telegram, kalendarz.py). 0 = bez przypomnień.
+PRZYPOMNIENIE_KALENDARZA = "JARVIS_PRZYPOMNIENIE_KALENDARZA_MIN"
+DOMYSLNE_PRZYPOMNIENIE_KALENDARZA_MIN = 30
+
+
+def przypomnienie_kalendarza_min():
+    try:
+        return max(0, int(wartosc(PRZYPOMNIENIE_KALENDARZA).strip() or DOMYSLNE_PRZYPOMNIENIE_KALENDARZA_MIN))
+    except ValueError:
+        return DOMYSLNE_PRZYPOMNIENIE_KALENDARZA_MIN
+
+
+# NASŁUCH — zakładka "Nasłuch" w Ustawieniach.
+#
+# Powitanie po starcie (powitanie_startowe.py): przez kilka minut po
+# uruchomieniu Jarvis słucha bez "Hey Jarvis", ale reaguje tylko na
+# powitania ("hej, wróciłem", "cześć Jarvis", "jestem"). Domyślnie włączone;
+# wyłącza je "0". Zmiana działa od następnego uruchomienia.
+POWITANIE_PO_STARCIE = "JARVIS_POWITANIE_PO_STARCIE"
+OKNO_POWITANIA = "JARVIS_OKNO_POWITANIA_MIN"
+DOMYSLNE_OKNO_POWITANIA_MIN = 10
+MAKS_OKNO_POWITANIA_MIN = 60
+
+# Próg czułości słowa aktywującego (slowo_aktywujace.py). Pusty =
+# automatycznie, czyli domyślny dla modelu. Nasłuch czyta go przy każdym
+# czekaniu na "Hey Jarvis", więc zmiana działa bez restartu.
+PROG_WAKE_WORDA = "JARVIS_PROG_WAKE_WORDA"
+
+# Żadne z nich nie wymaga restartu: próg działa od razu, a powitanie i tak
+# dotyczy dopiero następnego uruchomienia.
+BEZ_RESTARTU |= {POWITANIE_PO_STARCIE, OKNO_POWITANIA, PROG_WAKE_WORDA}
+
+
+def powitanie_po_starcie():
+    """Czy po starcie czekać na powitanie bez wake worda (domyślnie tak)."""
+    return wartosc(POWITANIE_PO_STARCIE).strip().lower() not in ("0", "nie", "false", "off")
+
+
+def okno_powitania_min():
+    """Ile minut po starcie Jarvis czeka na powitanie (1–60, domyślnie 10)."""
+    try:
+        minuty = int(wartosc(OKNO_POWITANIA).strip() or DOMYSLNE_OKNO_POWITANIA_MIN)
+    except ValueError:
+        return DOMYSLNE_OKNO_POWITANIA_MIN
+    return min(MAKS_OKNO_POWITANIA_MIN, max(1, minuty))
+
+
+def prog_wake_worda():
+    """Próg z Ustawień (liczba) albo None — automatycznie (opis w slowo_aktywujace.py)."""
+    try:
+        prog = float(wartosc(PROG_WAKE_WORDA).strip().replace(",", "."))
+    except ValueError:
+        return None
+    return prog if 0 < prog < 1 else None
+
+
+# OGÓLNE — zakładka "Ogólne" w Ustawieniach.
+#
+# Tryb roadmapy (roadmapa.py): Jarvis proponuje na Telegramie kolejne
+# zadania z MapaZadan.md, a po Twojej akceptacji robi je przez Claude Code na
+# gałęzi "roadmap". Domyślnie wyłączony — włącza się go świadomie.
+ROADMAPA = "JARVIS_ROADMAPA"
+ROADMAPA_RAPORT = "JARVIS_ROADMAPA_RAPORT"        # godzina raportu, np. "12:00"
+DOMYSLNY_RAPORT_ROADMAPY = (12, 0)
+
+# Claude Code (/kod i roadmapa): model do zadań trudnych i łatwych
+# (trudność zadania jest w MapaZadan.md; /kod zawsze bierze "trudny").
+CLAUDE_MODEL_TRUDNE = "JARVIS_CLAUDE_MODEL_TRUDNE"
+CLAUDE_MODEL_LATWE = "JARVIS_CLAUDE_MODEL_LATWE"
+MODELE_CLAUDE_CODE = (
+    ("claude-opus-5-5", "Opus 5.5"),
+    ("claude-opus-5", "Opus 5"),
+    ("claude-sonnet-5-5", "Sonnet 5.5"),
+    ("claude-sonnet-5", "Sonnet 5"),
+    ("claude-haiku-5-5", "Haiku 5.5"),
+)
+DOMYSLNE_MODELE_CLAUDE = {"trudne": "claude-opus-5-5", "latwe": "claude-sonnet-5-5"}
+
+# Wszystko to program czyta przy każdym użyciu — bez restartu.
+BEZ_RESTARTU |= {ROADMAPA, ROADMAPA_RAPORT, CLAUDE_MODEL_TRUDNE, CLAUDE_MODEL_LATWE}
+
+
+def roadmapa_wlaczona():
+    return _wlaczone(ROADMAPA)
+
+
+def raport_roadmapy():
+    """Godzina codziennego raportu roadmapy: (godzina, minuta), domyślnie (12, 0)."""
+    zapisana = wartosc(ROADMAPA_RAPORT).strip()
+    try:
+        godzina, minuta = (int(c) for c in zapisana.replace(".", ":").split(":"))
+        if 0 <= godzina < 24 and 0 <= minuta < 60:
+            return godzina, minuta
+    except ValueError:
+        pass
+    return DOMYSLNY_RAPORT_ROADMAPY
+
+
+def model_claude(trudnosc):
+    """
+    Model Claude Code dla zadania: trudnosc "trudne" albo "latwe".
+
+    Z Ustawień — także spoza listy, jeśli wygląda na nazwę modelu (np. nowy
+    model wpisany w .env); inaczej domyślny.
+    """
+    zmienna = CLAUDE_MODEL_LATWE if trudnosc == "latwe" else CLAUDE_MODEL_TRUDNE
+    zapisany = wartosc(zmienna).strip()
+    if zapisany.startswith("claude-") and zapisany.replace("-", "").isalnum():
+        return zapisany
+    return DOMYSLNE_MODELE_CLAUDE["latwe" if trudnosc == "latwe" else "trudne"]
+
+
+def nazwa_modelu(model):
+    """"claude-opus-5-5" -> "Opus 5.5"; nieznany zostaje, jak jest."""
+    return dict(MODELE_CLAUDE_CODE).get(model, model)
 
 
 def _wlaczone(zmienna):

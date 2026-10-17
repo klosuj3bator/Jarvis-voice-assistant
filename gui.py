@@ -101,7 +101,7 @@ import time  # noqa: E402
 
 import psutil  # noqa: E402
 from PySide6.QtCore import (QLineF, QObject, QPointF, QRect, QRectF, QSize, Qt, QTimer, QUrl,  # noqa: E402
-                            Signal)
+                            Signal, Slot)
 from PySide6.QtGui import (  # noqa: E402
     QAction, QColor, QFont, QFontDatabase, QGuiApplication, QIcon, QImage, QPainter,
     QPainterPath, QPen, QPixmap, QRadialGradient, QWindow,
@@ -185,6 +185,23 @@ STANY = {
         "kolor": (58, 168, 222),
         "akcent": BURSZTYN,
         "etykieta": "CZUWAM",
+        "tempo": 0.9,
+        "min": 0.58,
+        "max": 0.74,
+        "hud": 3.0,
+        "seg": 2.0,
+        "wewn": -6.0,
+        "bieg": 0.07,
+        "smuga": False,
+        "fale_co": 4.5,
+        "migot": 0.0,
+    },
+    # Okienko powitania po starcie (powitanie_startowe.py): wygląda jak
+    # czuwanie, tylko napis mówi, że wystarczy "cześć Jarvis", bez "Hey".
+    "powitanie": {
+        "kolor": (58, 168, 222),
+        "akcent": BURSZTYN,
+        "etykieta": "CZEKAM NA POWITANIE",
         "tempo": 0.9,
         "min": 0.58,
         "max": 0.74,
@@ -557,10 +574,22 @@ class _Most(QObject):
     tapeta = Signal(bool)     # tryb tapety — inny układ napisów
     wstrzymaj = Signal(bool)  # gra na pełnym ekranie — animacje stają
 
+    # Brakujące klucze API: {"brak": liczba, "anthropic": True/False} —
+    # linijka po prawej stronie HUD-a (konfiguracja.brakujace_klucze).
+    klucze = Signal(dict)
+
     # Ten jeden odbiera Python, nie QML: warstwa tapety zniknęła (np. restart
     # Explorera) i trzeba wstawić HUD od nowa. Zdarza się rzadko, więc
     # czekanie na GIL (opis wyżej) nie ma tu znaczenia.
     utrata_tapety = Signal()
+
+    # Kliknięcie linijki "Klucze API" — z QML do Pythona (main.py otwiera
+    # Ustawienia). Rzadkie, kliknięte palcem — GIL nie ma tu znaczenia.
+    prosba_o_klucze = Signal()
+
+    @Slot()
+    def otworzKlucze(self):
+        self.prosba_o_klucze.emit()
 
 
 class MostPanelu(QObject):
@@ -650,6 +679,11 @@ class JarvisHUD(QQuickView):
         # Nowe akcje przychodzą z wątku agenta — sygnał dowiezie je scenie.
         akcje.sluchaj(self._most.akcje.emit)
 
+        # Linijka "Klucze API" (ustaw_klucze) — kliknięcie woła przy_kluczach,
+        # które ustawia main.py (Ustawienia na zakładce Klucze API).
+        self.przy_kluczach = None
+        self._most.prosba_o_klucze.connect(lambda: self.przy_kluczach and self.przy_kluczach())
+
         # Tapeta idzie za monitorem: po odłączeniu, podłączeniu albo zmianie
         # rozdzielczości wstawiamy ją od nowa. Zdarzenia rzadkie — Python
         # w wątku GUI jest tu w porządku.
@@ -678,8 +712,8 @@ class JarvisHUD(QQuickView):
         """
         Zmienia stan animacji. BEZPIECZNE do wywołania z dowolnego wątku.
 
-        nazwa_stanu — "uruchamianie", "idle", "listening", "processing", "speaking",
-                      "error", "no_mic" albo "offline"
+        nazwa_stanu — "uruchamianie", "idle", "powitanie", "listening", "processing",
+                      "speaking", "error", "no_mic" albo "offline"
 
         Ta metoda niczego nie zmienia sama. Emituje sygnał, a Qt dostarczy go
         scenie w wątku GUI. Resztę — płynne przejście kolorów, nowe tempo
@@ -767,6 +801,10 @@ class JarvisHUD(QQuickView):
 
     def jest_tapeta(self):
         return self._tapeta
+
+    def ustaw_klucze(self, brak, bez_anthropic):
+        """Linijka "Klucze API: brak N" po prawej (0 = znika); bez Anthropic — czerwona."""
+        self._most.klucze.emit({"brak": int(brak), "anthropic": not bez_anthropic})
 
     def _ekran(self):
         """Monitor dla tapety: wybrany w Ustawieniach, a gdy go nie ma — główny."""
@@ -1149,7 +1187,7 @@ class TrayJarvisa:
 
     def __init__(self, app, okno, przy_zamknieciu=None, przy_ustawieniach=None,
                  czy_tryb_sluchawek=None, ustaw_tryb_sluchawek=None, ustaw_tryb_tapety=None,
-                 panel_boczny=None):
+                 panel_boczny=None, przy_kluczach=None):
         """
         app                  — obiekt QApplication
         okno                 — pełnoekranowy HUD Jarvisa
@@ -1164,6 +1202,8 @@ class TrayJarvisa:
                                HUD (main.py); bez niej nie ma tej pozycji
         panel_boczny         — pasek_boczny.SterownikPanelu; daje pozycję
                                "Wysuń panel", widoczną, gdy panel jest na HUD-zie
+        przy_kluczach        — funkcja otwierająca Ustawienia na zakładce Klucze API;
+                               pozycja "Klucze API: brak N" widać tylko, gdy czegoś brakuje
         """
         self._app = app
         self._okno = okno
@@ -1226,6 +1266,15 @@ class TrayJarvisa:
             self._akcja_panel.toggled.connect(panel_boczny.przypnij)
             self._menu.addAction(self._akcja_panel)
 
+        # Brakujące klucze (ustaw_klucze) — na tapecie HUD nie przyjmuje
+        # kliknięć, więc ta pozycja jest drugą drogą do Ustawień.
+        self._akcja_klucze = None
+        if przy_kluczach is not None:
+            self._akcja_klucze = QAction("Klucze API", self._menu)
+            self._akcja_klucze.triggered.connect(lambda: przy_kluczach())
+            self._akcja_klucze.setVisible(False)
+            self._menu.addAction(self._akcja_klucze)
+
         self._menu.addSeparator()
 
         akcja_zamknij = QAction("Zamknij Jarvisa", self._menu)
@@ -1249,6 +1298,14 @@ class TrayJarvisa:
         """
         if powod == QSystemTrayIcon.Trigger:
             self._przelacz_widocznosc()
+
+    def ustaw_klucze(self, brak, bez_anthropic):
+        """Pozycja "Klucze API: brak N" w menu — tylko gdy czegoś brakuje."""
+        if self._akcja_klucze is None:
+            return
+        self._akcja_klucze.setVisible(brak > 0)
+        self._akcja_klucze.setText(f"Klucze API: brak {brak}"
+                                   + (" — w tym Anthropic, bez niego nie ma rozmowy" if bez_anthropic else ""))
 
     def _odswiez_napis(self):
         """Dopasowuje napis w menu do tego, czy HUD jest aktualnie widoczny."""

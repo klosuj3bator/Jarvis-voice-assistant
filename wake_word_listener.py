@@ -18,14 +18,11 @@ import atexit
 import collections
 import contextlib
 import datetime
-import difflib
 import logging
 import os
-import re
 import sys
 import threading
 import time
-import unicodedata
 import wave
 
 import numpy as np
@@ -34,6 +31,7 @@ import sounddevice as sd
 import modele
 import sciezki
 import slownik
+import slowo_aktywujace
 import zajetosc
 
 # faster_whisper i openwakeword są importowane LENIWIE, w funkcjach poniżej.
@@ -52,9 +50,12 @@ logger = logging.getLogger(__name__)
 
 # Wbudowany model openWakeWord. Uwaga: to fraza "HEY Jarvis", nie samo "Jarvis".
 # Inne gotowe opcje: "alexa", "hey_mycroft", "hey_rhasspy".
-MODEL_WAKE_WORD = "hey_jarvis"
+# Własny model z models/jarvis.onnx ma pierwszeństwo — opis w slowo_aktywujace.py.
+MODEL_WAKE_WORD = slowo_aktywujace.MODEL_WBUDOWANY
 
-# Próg pewności 0.0-1.0, powyżej którego od razu uznajemy słowo za wykryte.
+# Domyślny próg pewności 0.0-1.0 dla "hey_jarvis", powyżej którego od razu
+# uznajemy słowo za wykryte. Właściwy próg podaje slowo_aktywujace.prog_wykrycia():
+# ten tutaj albo ustawiony w Ustawieniach (zakładka Nasłuch).
 #
 # DLACZEGO TAK NISKO (wcześniej było 0.5)
 # =======================================
@@ -76,13 +77,14 @@ MODEL_WAKE_WORD = "hey_jarvis"
 # z tego mikrofonu: najwyżej 0.0096 i ani jednej ramki powyżej 0.05.
 # Margines jest więc ogromny — stąd 0.2.
 #
-# Gdyby Jarvis zaczął się odzywać sam z siebie, podnieś tę wartość.
-PROG_WYKRYCIA = 0.2
+# Gdyby Jarvis zaczął się odzywać sam z siebie, podnieś próg w Ustawieniach.
+PROG_WYKRYCIA = slowo_aktywujace.PROG_WBUDOWANEGO
 
 # Drugi próg: za nisko, żeby reagować od razu, ale wyraźnie powyżej szumu.
 # Takie "podejrzenie" sprawdzamy jeszcze raz, Whisperem — patrz
 # _potwierdz_whisperem(). To ono łapie wymowę "Hej Jarwis" z ocenami ~0.09.
-PROG_PODEJRZENIA = 0.04
+# Liczony z progu wykrycia (przy 0.2 wychodzi 0.04) — slowo_aktywujace.prog_podejrzenia().
+PROG_PODEJRZENIA = slowo_aktywujace.prog_podejrzenia(PROG_WYKRYCIA)
 
 # Ile sekund nagrywamy po usłyszeniu wake worda. Stała długość — bez wykrywania ciszy.
 CZAS_NAGRANIA = 5
@@ -254,15 +256,9 @@ OPOZNIENIE_POTWIERDZENIA_S = 0.8
 # wychodziło jako "Duct album…" — pierwsze słowo zjadał detektor.
 OGON_PO_WYKRYCIU_S = 0.4
 
-# Jak Whisper zapisuje usłyszane "Jarvis". Nie trzeba przewidzieć wszystkich
-# form — porównujemy z nimi PODOBIEŃSTWO słowa, nie równość.
-WZORCE_JARVIS = ("jarvis", "jarwis", "dzarvis", "dzarwis", "dziarwis",
-                 "czarvis", "charvis", "arwis")
-
-# Jak bardzo słowo musi być podobne do jednego z wzorców (0.0-1.0).
-# 0.8 przepuszcza "jarwiz" i "dżarvisie", a odrzuca "jarzyny" (0.61)
-# i "jarosław" — sprawdzone na liście zwykłych polskich zdań.
-PROG_PODOBIENSTWA = 0.8
+# Rozpoznawanie imienia "Jarvis" w tekście z Whispera mieszka w
+# slowo_aktywujace.py (wzorce i próg podobieństwa) — korzysta z niego też
+# okienko powitania po starcie, które działa bez mikrofonu w testach.
 
 
 # --- Zasoby współdzielone między wywołaniami sluchaj_komendy() ---
@@ -271,6 +267,9 @@ PROG_PODOBIENSTWA = 0.8
 # Gdyby main.py budował je przy każdej komendzie, każda wypowiedź kosztowałaby
 # kilka sekund ładowania modelu i ponowne otwieranie urządzenia audio.
 _detektor = None
+# Czy detektor używa własnego modelu (models/jarvis.onnx). Od tego zależy
+# domyślny próg — slowo_aktywujace.prog_wykrycia().
+_wlasny_model = False
 _model_whisper = None
 _model_potwierdzenia = None
 _stream = None
@@ -454,8 +453,8 @@ def _odetnij_scikit_learn():
         from openwakeword.custom_verifier_model import train_custom_verifier
 
     Ten moduł służy do TRENOWANIA własnych słów-kluczy i jako jedyny w całej
-    bibliotece potrzebuje scikit-learn. My używamy wyłącznie gotowego modelu
-    "hey_jarvis", więc nigdy go nie wołamy — a mimo to płacilibyśmy za niego
+    bibliotece potrzebuje scikit-learn. My tylko używamy gotowych modeli
+    ("hey_jarvis" albo już wytrenowanego models/jarvis.onnx), więc nigdy go nie wołamy — a mimo to płacilibyśmy za niego
     ok. 13 sekund przy każdym zimnym starcie.
 
     Podstawiamy więc pod tę nazwę pustą atrapę, ZANIM openWakeWord zdąży
@@ -513,53 +512,73 @@ def _utworz_detektor():
     """
     Tworzy detektor słowa-klucza openWakeWord.
 
+    Gdy jest models/jarvis.onnx — z własnym modelem (opis w slowo_aktywujace.py),
+    a gdy go nie ma albo się nie wczyta — z wbudowanym "hey_jarvis".
+
     Przy pierwszym uruchomieniu pobiera modele (~kilkanaście MB) do katalogu
     biblioteki. Kolejne uruchomienia działają już w pełni offline.
 
     Zwraca: obiekt Model gotowy do wywołania .predict().
     """
+    global _wlasny_model
+
     _odetnij_scikit_learn()
 
     from openwakeword.model import Model as WakeWordModel
-
-    logger.info("Przygotowuję detektor wake worda '%s'...", MODEL_WAKE_WORD)
 
     # Wersja z instalatora (albo komplet w %APPDATA%): modele pobrał kreator
     # do %APPDATA%\Jarvis\modele (opis w modele.py). Katalog biblioteki jest
     # wtedy wewnątrz paczki, tylko do odczytu — nie ma go co odpytywać.
     if modele.openwakeword_z_appdata():
-        detektor = WakeWordModel(
-            wakeword_models=[modele.plik_openwakeword(f"{MODEL_WAKE_WORD}_v0.1.onnx")],
-            melspec_model_path=modele.plik_openwakeword("melspectrogram.onnx"),
-            embedding_model_path=modele.plik_openwakeword("embedding_model.onnx"),
-            inference_framework="onnx",
-        )
-        logger.info("Detektor gotowy (modele z %s).", sciezki.MODELE)
-        return detektor
-
-    # download_models() pobiera model + pliki pomocnicze (melspectrogram,
-    # embedding, VAD). Wołamy ją TYLKO wtedy, gdy czegoś brakuje.
-    #
-    # Zmierzone: nawet przy komplecie plików funkcja traci 2,6 s na odpytywanie
-    # sieci. Po restarcie komputera bywa gorzej, bo karta sieciowa może jeszcze
-    # nie mieć połączenia i zapytanie czeka na timeout.
-    if _brakuje_modeli():
-        logger.info("Brakuje plików modeli — pobieram (jednorazowo)...")
-        from openwakeword.utils import download_models
-
-        download_models(model_names=[MODEL_WAKE_WORD])
+        wbudowany = modele.plik_openwakeword(f"{MODEL_WAKE_WORD}_v0.1.onnx")
+        pomocnicze = {
+            "melspec_model_path": modele.plik_openwakeword("melspectrogram.onnx"),
+            "embedding_model_path": modele.plik_openwakeword("embedding_model.onnx"),
+        }
+        skad = f" (modele z {sciezki.MODELE})"
     else:
-        logger.info("Pliki modeli są na miejscu — pomijam sprawdzanie sieci.")
+        # download_models() pobiera model + pliki pomocnicze (melspectrogram,
+        # embedding, VAD). Wołamy ją TYLKO wtedy, gdy czegoś brakuje. Własny
+        # model też ich potrzebuje — sam ocenia tylko to, co z nich wyjdzie.
+        #
+        # Zmierzone: nawet przy komplecie plików funkcja traci 2,6 s na odpytywanie
+        # sieci. Po restarcie komputera bywa gorzej, bo karta sieciowa może jeszcze
+        # nie mieć połączenia i zapytanie czeka na timeout.
+        if _brakuje_modeli():
+            logger.info("Brakuje plików modeli — pobieram (jednorazowo)...")
+            from openwakeword.utils import download_models
+
+            download_models(model_names=[MODEL_WAKE_WORD])
+        else:
+            logger.info("Pliki modeli są na miejscu — pomijam sprawdzanie sieci.")
+        wbudowany, pomocnicze, skad = MODEL_WAKE_WORD, {}, ""
 
     # inference_framework="onnx" jest tu KONIECZNE.
     # Domyślną wartością biblioteki jest "tflite", ale tflite-runtime nie ma
     # wersji na Windows — bez tego argumentu dostaniesz błąd importu.
-    detektor = WakeWordModel(
-        wakeword_models=[MODEL_WAKE_WORD],
-        inference_framework="onnx",
-    )
+    wlasny = slowo_aktywujace.wlasny_model()
+    if wlasny:
+        logger.info("Przygotowuję detektor z własnym modelem %s...", wlasny)
+        try:
+            detektor = WakeWordModel(wakeword_models=[wlasny], inference_framework="onnx",
+                                     **pomocnicze)
+            # Próbna porcja ciszy: model wytrenowany pod inne wejście wyłoży
+            # się tutaj, przy starcie, a nie w trakcie czekania na "Jarvis".
+            detektor.predict(np.zeros(DLUGOSC_RAMKI, dtype=np.int16))
+            detektor.reset()
+            _wlasny_model = True
+            logger.info("Detektor gotowy: %s, próg %.2f%s.",
+                        slowo_aktywujace.opis_modelu(True),
+                        slowo_aktywujace.prog_wykrycia(True), skad)
+            return detektor
+        except Exception:
+            logger.exception("Własny model %s nie działa — zostaje '%s'.", wlasny, MODEL_WAKE_WORD)
 
-    logger.info("Detektor gotowy.")
+    logger.info("Przygotowuję detektor wake worda '%s'...", MODEL_WAKE_WORD)
+    _wlasny_model = False
+    detektor = WakeWordModel(wakeword_models=[wbudowany], inference_framework="onnx", **pomocnicze)
+    logger.info("Detektor gotowy: %s, próg %.2f%s.", slowo_aktywujace.opis_modelu(False),
+                slowo_aktywujace.prog_wykrycia(False), skad)
     return detektor
 
 
@@ -701,32 +720,9 @@ def _wczytaj_model_potwierdzenia():
                             compute_type="int8", cpu_threads=2)
 
 
-def _bez_ogonkow(tekst):
-    """
-    "Dżarwiś" -> "dzarwis".
-
-    Whisper zapisuje usłyszane imię raz tak, raz tak — porównywanie liter
-    ma sens dopiero wtedy, gdy ogonki i kreski nie robią różnicy.
-    """
-    rozlozony = unicodedata.normalize("NFD", tekst.lower().replace("ł", "l"))
-    return "".join(znak for znak in rozlozony
-                   if unicodedata.category(znak) != "Mn")
-
-
-def _brzmi_jak_jarvis(tekst):
-    """
-    Czy w tekście padło słowo brzmiące jak "Jarvis"?
-
-    Porównujemy PODOBIEŃSTWO, nie równość, bo Whisper zapisuje to imię
-    na kilkanaście sposobów: "Jarwiz", "Dżarvisie", "Arwis". Gotowa lista
-    nigdy nie byłaby kompletna, a miara podobieństwa łapie i te formy,
-    których nikt nie przewidział.
-    """
-    for slowo in re.findall(r"[a-z]+", _bez_ogonkow(tekst or "")):
-        for wzorzec in WZORCE_JARVIS:
-            if difflib.SequenceMatcher(None, slowo, wzorzec).ratio() >= PROG_PODOBIENSTWA:
-                return True
-    return False
+# "Czy w tekście padło Jarvis?" — opis i wzorce w slowo_aktywujace.py.
+_bez_ogonkow = slowo_aktywujace.bez_ogonkow
+_brzmi_jak_jarvis = slowo_aktywujace.brzmi_jak_jarvis
 
 
 def _potwierdz_whisperem(bufor):
@@ -784,8 +780,8 @@ def _czekaj_na_wake_word(pomijaj_gdy_zajety=True, stop=None, ignoruj=None, ogon=
     Dla każdej 80-milisekundowej porcji audio detektor zwraca słownik
     {nazwa_modelu: pewność 0.0-1.0}. Dalej są dwie drogi:
 
-      WYNIK > PROG_WYKRYCIA        -> reagujemy natychmiast,
-      WYNIK > PROG_PODEJRZENIA     -> pytamy Whispera, czy to naprawdę było
+      WYNIK > próg wykrycia        -> reagujemy natychmiast,
+      WYNIK > próg podejrzenia     -> pytamy Whispera, czy to naprawdę było
                                       "Jarvis" (ok. 0,8 s, patrz opis stałych).
 
     Druga droga istnieje dlatego, że detektor ocenia brzmienie i przy polskiej
@@ -794,6 +790,11 @@ def _czekaj_na_wake_word(pomijaj_gdy_zajety=True, stop=None, ignoruj=None, ogon=
     Zwraca: True gdy wykryto słowo, False gdy poproszono o zatrzymanie programu
     (albo gdy ustawiono `stop`).
     """
+    # Progi bierzemy przy każdym czekaniu: zmiana w Ustawieniach działa od
+    # następnego "Hey Jarvis", bez restartu (slowo_aktywujace.py).
+    prog = slowo_aktywujace.prog_wykrycia(_wlasny_model)
+    prog_podejrzenia = slowo_aktywujace.prog_podejrzenia(prog)
+
     if pomijaj_gdy_zajety:
         logger.info("[NASŁUCH] Czekam na 'Hey Jarvis'...")
 
@@ -842,7 +843,7 @@ def _czekaj_na_wake_word(pomijaj_gdy_zajety=True, stop=None, ignoruj=None, ogon=
         # w słowniku bywa wersjonowana ("hey_jarvis_v0.1"), więc tak jest odporniej.
         wynik = max(_detektor.predict(audio).values())
 
-        if wynik > PROG_WYKRYCIA:
+        if wynik > prog:
             if sam_sie_wola():
                 continue
             logger.info("[WYKRYTO] pewność %.3f", wynik)
@@ -854,7 +855,7 @@ def _czekaj_na_wake_word(pomijaj_gdy_zajety=True, stop=None, ignoruj=None, ogon=
 
         teraz = time.monotonic()
 
-        if wynik > PROG_PODEJRZENIA:
+        if wynik > prog_podejrzenia:
             # Podejrzenie trwa. Nie wołamy Whispera od razu: ocena detektora
             # narasta z każdą sylabą i za moment może przekroczyć próg pewności,
             # a wtedy odpowiedź będzie natychmiastowa i za darmo.
@@ -1222,7 +1223,7 @@ def _przygotuj_vad():
     return _vad
 
 
-def sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
+def sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8, cicho=False):
     """
     Nasłuch w trakcie rozmowy, bez "Hey Jarvis". Pełny opis zachowania
     i zwracanych wartości — przy _sluchaj_bez_wake_worda() poniżej.
@@ -1234,14 +1235,14 @@ def sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8):
     przy następnym czuwaniu.
     """
     try:
-        return _sluchaj_bez_wake_worda(orb_callback, limit_ciszy_s)
+        return _sluchaj_bez_wake_worda(orb_callback, limit_ciszy_s, cicho=cicho)
     except sd.PortAudioError as e:
         _mikrofon_utracony(e)
         return None
 
 
 def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8, po_przerwaniu=False,
-                            poczatek=(), mowa_trwa=False):
+                            poczatek=(), mowa_trwa=False, cicho=False):
     """
     Nasłuchuje BEZ wymagania "Hey Jarvis" — to tryb trwającej rozmowy.
 
@@ -1259,6 +1260,10 @@ def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8, po_przerwaniu=Fa
                     właśnie mówisz i od razu nagrywamy do ciszy. Czekanie na
                     "początek mowy" zgubiłoby krótkie "stop" — zanim byśmy
                     zaczęli czekać, już byś skończył.
+    cicho         — True w okienku powitania po starcie (powitanie_startowe.py):
+                    słychać wtedy także cudze rozmowy, więc rozpoznany tekst
+                    NIE trafia do jarvis.log, a nierozpoznane nagrania nie są
+                    zapisywane na dysk. Co było do Jarvisa, zapisze rozmowa.
 
     Różnica wobec sluchaj_komendy() jest dwojaka:
 
@@ -1347,10 +1352,10 @@ def _sluchaj_bez_wake_worda(orb_callback=None, limit_ciszy_s=8, po_przerwaniu=Fa
         zglos("listening")
         logger.info("[ROZMOWA] Słyszę mowę, nagrywam...")
         return _dokoncz_wypowiedz(list(poczatek) + list(pre_bufor), vad, zglos,
-                                  limit_ciszy_konczacej, limit_nagrania)
+                                  limit_ciszy_konczacej, limit_nagrania, cicho)
 
 
-def _dokoncz_wypowiedz(porcje, vad, zglos, limit_ciszy_konczacej, limit_nagrania):
+def _dokoncz_wypowiedz(porcje, vad, zglos, limit_ciszy_konczacej, limit_nagrania, cicho=False):
     """
     Druga połowa _sluchaj_bez_wake_worda(): nagrywa do ciszy i rozpoznaje.
 
@@ -1403,10 +1408,15 @@ def _dokoncz_wypowiedz(porcje, vad, zglos, limit_ciszy_konczacej, limit_nagrania
     _oproznij_bufor()
 
     if tekst:
-        logger.info("[ROZMOWA] (%s, %.0f%%) %s", jezyk, pewnosc * 100, tekst)
+        if cicho:
+            logger.info("[ROZMOWA] (%s, %.0f%%) rozpoznano %d słów", jezyk, pewnosc * 100,
+                        len(tekst.split()))
+        else:
+            logger.info("[ROZMOWA] (%s, %.0f%%) %s", jezyk, pewnosc * 100, tekst)
         return tekst
 
-    _zapisz_nierozpoznane(audio, glosnosc)
+    if not cicho:
+        _zapisz_nierozpoznane(audio, glosnosc)
 
     # VAD usłyszał dźwięk, ale Whisper nie wydobył z niego słów — to najczęściej
     # kaszlnięcie, trzaśnięcie drzwiami albo muzyka w tle.
@@ -1610,7 +1620,10 @@ def kalibracja(ile_prob=5):
     dopytywać Whispera. Na końcu podpowiada próg dopasowany do Ciebie.
     """
     _przygotuj()
-    print("\nPowiedz 'Hey Jarvis' po każdym sygnale. Ctrl+C przerywa.\n")
+    prog = slowo_aktywujace.prog_wykrycia(_wlasny_model)
+    prog_podejrzenia = slowo_aktywujace.prog_podejrzenia(prog)
+    print(f"\nModel: {slowo_aktywujace.opis_modelu(_wlasny_model)}.")
+    print("Powiedz 'Hey Jarvis' po każdym sygnale. Ctrl+C przerywa.\n")
 
     wyniki = []
     for numer in range(1, ile_prob + 1):
@@ -1624,22 +1637,22 @@ def kalibracja(ile_prob=5):
             najlepszy = max(najlepszy, max(_detektor.predict(dane.flatten()).values()))
 
         wyniki.append(najlepszy)
-        if najlepszy > PROG_WYKRYCIA:
+        if najlepszy > prog:
             ocena = "reakcja natychmiastowa"
-        elif najlepszy > PROG_PODEJRZENIA:
+        elif najlepszy > prog_podejrzenia:
             ocena = "potwierdzenie Whisperem (ok. 1 s później)"
         else:
             ocena = "NIE WYKRYTO — spróbuj wymówić 'Hej Dżarwis'"
         print(f"  ocena {najlepszy:.3f} -> {ocena}")
 
     print(f"\nNajsłabsza próba: {min(wyniki):.3f}, najlepsza: {max(wyniki):.3f}")
-    print(f"Progi w kodzie: wykrycie {PROG_WYKRYCIA}, podejrzenie {PROG_PODEJRZENIA}")
-    if min(wyniki) < PROG_PODEJRZENIA:
-        print("Twoje najsłabsze próby są poniżej progu podejrzenia — obniż "
-              "PROG_PODEJRZENIA w wake_word_listener.py.")
-    elif min(wyniki) < PROG_WYKRYCIA:
-        print(f"Chcesz reagować od razu, bez czekania? Ustaw PROG_WYKRYCIA "
-              f"na {max(0.02, min(wyniki) * 0.8):.2f}.")
+    print(f"Progi: wykrycie {prog}, podejrzenie {prog_podejrzenia}")
+    if min(wyniki) < prog_podejrzenia:
+        print("Twoje najsłabsze próby są poniżej progu podejrzenia — obniż próg "
+              "w Ustawieniach (zakładka Nasłuch).")
+    elif min(wyniki) < prog:
+        print(f"Chcesz reagować od razu, bez czekania? Ustaw próg w Ustawieniach "
+              f"(zakładka Nasłuch) na {max(slowo_aktywujace.PROG_MIN, min(wyniki) * 0.8):.2f}.")
     else:
         print("Wszystkie próby są powyżej progu — Jarvis reaguje od razu.")
     zamknij()

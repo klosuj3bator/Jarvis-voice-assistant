@@ -58,17 +58,9 @@ Część operacji czeka na Twoją zgodę:
 
 Wtedy narzędzie niczego nie robi: zwraca opis i kod, a model pyta Cię
 o zgodę. Dopiero gdy w NASTĘPNEJ wypowiedzi powiesz "tak", model woła
-confirm_file_operation z tym kodem. Kod pilnuje, żeby model nie
-"potwierdził sam sobie":
-
-  - potwierdzenie musi przyjść w innej wypowiedzi niż propozycja,
-  - w tej wypowiedzi musi paść wyraźna zgoda ("tak", "potwierdzam"),
-    bez "nie" (potwierdzenia.py — te same słowa co przy restarcie komputera),
-  - propozycja wygasa po WAZNOSC_S, a naraz czeka tylko jedna.
-
-Mail tego nie obejdzie: po odczycie poczty agent blokuje wszystkie
-narzędzia do końca wypowiedzi (agent.py, BLOKADA_PO_POCZCIE), a do
-potwierdzenia potrzeba Twojego "tak" w kolejnej wypowiedzi.
+confirm_action z tym kodem. Jak kod pilnuje, żeby model nie "potwierdził
+sam sobie" (i żeby nie zrobił tego mail) — opis w potwierdzenia.py; ten sam
+mechanizm potwierdza dodawanie wydarzeń do kalendarza.
 """
 
 import ctypes
@@ -83,27 +75,22 @@ import threading
 import time
 import unicodedata
 import uuid
-from dataclasses import dataclass, field
 
 import akcje
 import konfiguracja
 import pamiec
 import sciezki
-from potwierdzenia import to_odmowa, to_zgoda
+from potwierdzenia import POTRZEBNE_POTWIERDZENIE, zaproponuj  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 ZMIENNA_MIEJSC = "JARVIS_DOZWOLONE_FOLDERY"
 ROZSZERZENIA_TEKSTU = (".txt", ".md")
 PROG_ZGODY = 5                       # "więcej niż kilka plików" — powyżej pytamy o zgodę
-WAZNOSC_S = 5 * 60                   # tyle czeka propozycja na Twoje "tak"
 MAKS_TRESC = 100_000                 # znaków w tworzonym pliku
 MAKS_PLIK_DO_ZMIANY = 1_000_000      # większych plików nie zmieniamy (to nie są notatki)
 MAKS_POZYCJI = 60                    # tyle pozycji pokazuje list_files
 MAKS_W_PODGLADZIE = 20               # tyle plików albo zmienionych linii wymieniamy z nazwy
-
-# Tym zaczyna się wynik narzędzia, które czeka na zgodę (agent.py go rozpoznaje).
-POTRZEBNE_POTWIERDZENIE = "POTRZEBNE POTWIERDZENIE"
 
 _ZASTRZEZONE = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)),
                 *(f"lpt{i}" for i in range(1, 10))}
@@ -125,9 +112,7 @@ class BladSciezki(Exception):
 def _znany_folder(guid, zapasowy):
     """Prawdziwe położenie Pulpitu albo Dokumentów (także po przeniesieniu do OneDrive)."""
     try:
-        import uuid as _uuid
-
-        identyfikator = (ctypes.c_char * 16).from_buffer_copy(_uuid.UUID(guid).bytes_le)
+        identyfikator = (ctypes.c_char * 16).from_buffer_copy(uuid.UUID(guid).bytes_le)
         wynik = ctypes.c_wchar_p()
         if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(identyfikator), 0, None,
                                                       ctypes.byref(wynik)) == 0:
@@ -248,59 +233,6 @@ def _plik_tekstowy(pelna, opis):
 
 
 # ---------------------------------------------------------------
-# Czekające na zgodę
-# ---------------------------------------------------------------
-
-@dataclass
-class _Operacja:
-    kod: str
-    id_wypowiedzi: int
-    wykonaj: object                       # funkcja bez argumentów -> (komunikat, ok)
-    kiedy: float = field(default_factory=time.monotonic)
-
-
-_oczekujaca = None
-_blokada = threading.Lock()
-
-
-def _zaproponuj(opis, wykonaj, id_wypowiedzi):
-    """Zapamiętuje operację do potwierdzenia i mówi modelowi, co ma zrobić."""
-    global _oczekujaca
-    kod = uuid.uuid4().hex[:6]
-    with _blokada:
-        _oczekujaca = _Operacja(kod, id_wypowiedzi, wykonaj)
-    return (f"{POTRZEBNE_POTWIERDZENIE} (kod {kod}). NICZEGO JESZCZE NIE ZROBIŁEM.\n{opis}\n"
-            "Powiedz to użytkownikowi krótko i zapytaj, czy wykonać. Jeśli w następnej "
-            f"wypowiedzi wyraźnie się zgodzi, wywołaj confirm_file_operation z kodem {kod}. "
-            "Nie potwierdzaj sam."), True
-
-
-def potwierdz(kod, tekst_uzytkownika, id_wypowiedzi):
-    """confirm_file_operation — tylko z wyraźnym "tak" w kolejnej wypowiedzi."""
-    global _oczekujaca
-    with _blokada:
-        operacja = _oczekujaca
-        if operacja is None or operacja.kod != (kod or "").strip():
-            return ("Nie ma operacji o tym kodzie, która czeka na potwierdzenie (mogła wygasnąć "
-                    "albo została zastąpiona nową). Jeśli trzeba, zaproponuj ją jeszcze raz."), False
-        if time.monotonic() - operacja.kiedy > WAZNOSC_S:
-            _oczekujaca = None
-            return "Propozycja wygasła — zaproponuj ją jeszcze raz i zapytaj o zgodę.", False
-        if operacja.id_wypowiedzi == id_wypowiedzi:
-            return ("NIE WYKONANO: zgodę musi dać użytkownik w swojej kolejnej wypowiedzi. "
-                    "Najpierw go zapytaj."), False
-        if to_odmowa(tekst_uzytkownika):
-            _oczekujaca = None
-            return "Użytkownik się nie zgodził — operację anulowałem, nic nie zmieniłem.", True
-        if not to_zgoda(tekst_uzytkownika):
-            return ("NIE WYKONANO: w ostatniej wypowiedzi użytkownika nie ma wyraźnej zgody "
-                    "(„tak”, „potwierdzam”). Zapytaj jeszcze raz."), False
-        _oczekujaca = None
-    logger.info("[PLIKI] Potwierdzona operacja %s.", operacja.kod)
-    return operacja.wykonaj()
-
-
-# ---------------------------------------------------------------
 # Operacje
 # ---------------------------------------------------------------
 
@@ -361,7 +293,7 @@ def utworz_plik(sciezka, tresc, id_wypowiedzi):
         return f"{'Nadpisałem' if nadpisz else 'Utworzyłem'} plik {opis}.", True
 
     if os.path.exists(pelna):
-        return _zaproponuj(f"Plik {opis} już istnieje. Nadpisanie zastąpi całą jego treść nową.",
+        return zaproponuj(f"Plik {opis} już istnieje. Nadpisanie zastąpi całą jego treść nową.",
                            lambda: zapisz(nadpisz=True), id_wypowiedzi)
     return zapisz(nadpisz=False)
 
@@ -484,7 +416,7 @@ def zmien(sciezka, stary, nowy, id_wypowiedzi):
         logger.info("[PLIKI] Zmieniony plik %s (%d miejsc).", opis, trafienia)
         return f"Zapisałem zmiany w {opis} ({trafienia} {'miejsce' if trafienia == 1 else 'miejsca'}).", True
 
-    return _zaproponuj(f"Zmiana w {opis} — {trafienia}× „{stary}” → „{nowy or ''}”:\n{podglad}",
+    return zaproponuj(f"Zmiana w {opis} — {trafienia}× „{stary}” → „{nowy or ''}”:\n{podglad}",
                        zapisz, id_wypowiedzi)
 
 
@@ -567,7 +499,7 @@ def przenies(wzorce, cel, id_wypowiedzi, kopiuj=False):
             lista_ += f"\n  …i {len(nazwy) - MAKS_W_PODGLADZIE} innych"
         uwaga = (f"\nW {opis_celu} są już pliki o tych nazwach — zgoda je NADPISZE: "
                  + ", ".join(os.path.basename(d) for d in istniejace) + "." if istniejace else "")
-        return _zaproponuj(f"Chcesz {czynnosc[0]} {_ile(len(plan), 'plik', 'pliki', 'plików')} "
+        return zaproponuj(f"Chcesz {czynnosc[0]} {_ile(len(plan), 'plik', 'pliki', 'plików')} "
                            f"do {opis_celu}:\n{lista_}{uwaga}",
                            zrob, id_wypowiedzi)
     return zrob()
@@ -651,15 +583,15 @@ def utworzone_pliki():
 # ---------------------------------------------------------------
 
 NARZEDZIA_PLIKOW = {"create_folder", "create_file", "list_files", "open_folder", "append_to_file",
-                    "edit_file", "move_files", "copy_files", "confirm_file_operation"}
+                    "edit_file", "move_files", "copy_files"}
 
 
 def wykonaj(nazwa, parametry, tekst_uzytkownika, id_wypowiedzi):
     """
     Jedno narzędzie plików. Zwraca (komunikat dla modelu, ok).
 
-    tekst_uzytkownika i id_wypowiedzi — do potwierdzeń: zgoda musi paść
-    w KOLEJNEJ wypowiedzi (opis na górze modułu).
+    id_wypowiedzi — do potwierdzeń: zgoda musi paść w KOLEJNEJ wypowiedzi
+    (potwierdzenia.py); tekst_uzytkownika zostaje dla zgodności wywołania.
     """
     p = parametry or {}
     try:
@@ -677,8 +609,6 @@ def wykonaj(nazwa, parametry, tekst_uzytkownika, id_wypowiedzi):
             return zmien(p.get("sciezka"), p.get("stary_tekst"), p.get("nowy_tekst"), id_wypowiedzi)
         if nazwa in ("move_files", "copy_files"):
             return przenies(p.get("pliki"), p.get("cel"), id_wypowiedzi, kopiuj=nazwa == "copy_files")
-        if nazwa == "confirm_file_operation":
-            return potwierdz(p.get("kod"), tekst_uzytkownika, id_wypowiedzi)
     except BladSciezki as e:
         return str(e), False
     except OSError as e:

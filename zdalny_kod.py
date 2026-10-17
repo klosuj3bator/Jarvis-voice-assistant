@@ -142,11 +142,12 @@ LIMIT_ZADANIA_S = 20 * 60
 # za działający. Strażnik czeka tyle samo, zanim ogłosi udany restart.
 STABILNOSC_S = 15
 
-# Model i wysiłek Claude Code — te same co w sesji Claude Code, w której
-# powstawał Jarvis. Bez nich Claude Code brał, co miał domyślnie (05.10:
-# Opus 5 z wznowionej starej rozmowy, w innym folderze Sonnet 5).
-# Opus 5.5 na "xhigh" szybciej zużywa limit subskrypcji niż Sonnet.
-MODEL = "claude-opus-5-5"
+# Model i wysiłek Claude Code. Bez --model Claude Code brał, co miał
+# domyślnie (05.10: Opus 5 z wznowionej starej rozmowy, w innym folderze
+# Sonnet 5). Model wybierasz w Ustawieniach (Ogólne → Claude Code):
+# /kod bierze model do zadań trudnych (domyślnie Opus 5.5), roadmapa —
+# według trudności zadania (roadmapa.py). Opus 5.5 na "xhigh" szybciej
+# zużywa limit subskrypcji niż Sonnet.
 WYSILEK = "xhigh"
 
 # Warstwy 1 i 2 z opisu modułu.
@@ -191,7 +192,7 @@ class BladKodu(Exception):
 # Git
 # ---------------------------------------------------------------
 
-def _git(*argumenty, indeks=None, wejscie=None, jako_jarvis=False, sprawdz=True):
+def _git(*argumenty, indeks=None, wejscie=None, jako_jarvis=False, sprawdz=True, katalog=None):
     """
     Jedno polecenie gita w folderze Jarvisa. Zwraca wyjście (tekst).
 
@@ -199,6 +200,8 @@ def _git(*argumenty, indeks=None, wejscie=None, jako_jarvis=False, sprawdz=True)
                   Twojego prawdziwego indeksu
     jako_jarvis — autor "Jarvis" (migawki; Twoje commity idą jako Ty)
     sprawdz     — False: przy błędzie zwraca None zamiast rzucać BladKodu
+    katalog     — inny folder tego repozytorium (kopia robocza roadmapy,
+                  roadmapa.py); domyślnie folder Jarvisa
     """
     srodowisko = None
     if indeks or jako_jarvis:
@@ -210,7 +213,7 @@ def _git(*argumenty, indeks=None, wejscie=None, jako_jarvis=False, sprawdz=True)
                 srodowisko[f"GIT_{rola}_NAME"] = "Jarvis"
                 srodowisko[f"GIT_{rola}_EMAIL"] = "jarvis@localhost"
     try:
-        wynik = subprocess.run(["git", "-c", "core.quotepath=off", *argumenty], cwd=KATALOG,
+        wynik = subprocess.run(["git", "-c", "core.quotepath=off", *argumenty], cwd=katalog or KATALOG,
                                env=srodowisko, input=wejscie, capture_output=True,
                                timeout=120, creationflags=BEZ_OKNA)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -250,7 +253,7 @@ def _znacznik_czasu():
     return time.strftime("%Y-%m-%d_%H-%M-%S")
 
 
-def zrzut(opis):
+def zrzut(opis, katalog=None):
     """
     Migawka całego folderu (bez plików z .gitignore) jako commit poza gałęziami.
 
@@ -262,11 +265,11 @@ def zrzut(opis):
     """
     with tempfile.TemporaryDirectory() as tymczasowy:
         indeks = os.path.join(tymczasowy, "index")
-        _git("add", "-A", "--", ":/", indeks=indeks)
-        drzewo = _git("write-tree", indeks=indeks)
-    head = _head()
+        _git("add", "-A", "--", ":/", indeks=indeks, katalog=katalog)
+        drzewo = _git("write-tree", indeks=indeks, katalog=katalog)
+    head = _git("rev-parse", "-q", "--verify", "HEAD^{commit}", sprawdz=False, katalog=katalog)
     return _git("commit-tree", drzewo, *(["-p", head] if head else []), "-m", opis,
-                jako_jarvis=True)
+                jako_jarvis=True, katalog=katalog)
 
 
 def _zmiany(od, do):
@@ -358,12 +361,39 @@ def dostepny(z_claude=False):
 
 _blokada = threading.Lock()
 _zadanie = None     # {"polecenie": str, "od": monotonic, "proces": Popen albo None}
+# Zadanie Claude Code spoza /kod — z roadmapy (roadmapa.py): jego opis albo None.
+# Naraz pracuje jeden Claude Code: dwa zmieniałyby kod, nie wiedząc o sobie.
+_inne = None
 
 
 def trwa():
     """Czy właśnie trwa zadanie /kod."""
     with _blokada:
         return _zadanie is not None
+
+
+def zajety():
+    """Opis zadania Claude Code, które właśnie trwa (/kod albo roadmapa), albo None."""
+    with _blokada:
+        if _zadanie is not None:
+            return f"zadanie /kod „{_skrot(_zadanie['polecenie'])}”"
+        return _inne
+
+
+def zarezerwuj(opis):
+    """Roadmapa: zajmuje Claude Code dla siebie. False, gdy coś już trwa."""
+    global _inne
+    with _blokada:
+        if _zadanie is not None or _inne is not None:
+            return False
+        _inne = opis
+        return True
+
+
+def zwolnij():
+    global _inne
+    with _blokada:
+        _inne = None
 
 
 def _wczytaj_zadania():
@@ -415,6 +445,8 @@ def zlec(polecenie, wyslij):
             return (f"Już pracuję nad: „{_skrot(_zadanie['polecenie'])}” (od "
                     f"{_czas(time.monotonic() - _zadanie['od'])}). Naraz robię jedno zadanie "
                     "— poczekaj na wynik.")
+        if _inne is not None:
+            return f"Trwa {_inne}. Naraz robię jedno zadanie Claude Code — poczekaj na wynik."
         _zadanie = {"polecenie": polecenie, "od": time.monotonic(), "proces": None}
 
     try:
@@ -463,16 +495,27 @@ def _python_konsolowy():
     return python
 
 
-def polecenie_claude():
-    """Pełne polecenie Claude Code — osobno, żeby autotest mógł je sprawdzić."""
-    return [shutil.which("claude") or "claude", "-p", "--continue",
-            "--model", MODEL, "--effort", WYSILEK,
+def polecenie_claude(model=None, kontynuuj=True, zakazane=(), narzedzia=None):
+    """
+    Pełne polecenie Claude Code — osobno, żeby autotest mógł je sprawdzić.
+
+    model     — domyślnie model do zadań trudnych z Ustawień
+    kontynuuj — --continue: dalszy ciąg ostatniej rozmowy w tym folderze
+                (/kod zawsze; roadmapa tylko przy wznawianiu przerwanego zadania)
+    zakazane  — dodatkowe --disallowedTools (roadmapa: nie edytuje mapy zadań)
+    narzedzia — węższa lista narzędzi, np. "Read,Glob,Grep" — samo czytanie
+                (roadmapa sprawdza tak, czego potrzebuje zadanie z Części B)
+    """
+    narzedzia = narzedzia or NARZEDZIA
+    dozwolone = [d for d in DOZWOLONE if d.split("(")[0] in narzedzia.split(",")]
+    return [shutil.which("claude") or "claude", "-p", *(["--continue"] if kontynuuj else []),
+            "--model", model or konfiguracja.model_claude("trudne"), "--effort", WYSILEK,
             "--permission-mode", "acceptEdits", "--output-format", "json",
             "--strict-mcp-config", "--setting-sources", "user",
             "--settings", json.dumps(_ustawienia_claude()),
-            "--tools", NARZEDZIA,
-            "--allowedTools", *DOZWOLONE,
-            "--disallowedTools", *ZAKAZANE]
+            "--tools", narzedzia,
+            "--allowedTools", *dozwolone,
+            "--disallowedTools", *ZAKAZANE, *zakazane]
 
 
 def _zabij_drzewo(pid):
@@ -489,27 +532,59 @@ def _zabij_drzewo(pid):
 
 
 def _uruchom_claude(tresc):
-    """Zwraca (wynik z JSON albo None, opis błędu albo None)."""
+    """Zadanie /kod. Zwraca (wynik z JSON albo None, opis błędu albo None)."""
+    def zapamietaj(proces):
+        with _blokada:
+            if _zadanie is not None:
+                _zadanie["proces"] = proces
+
+    wynik, blad, _ = uruchom_claude_code(tresc, polecenie_claude(), KATALOG, LIMIT_ZADANIA_S,
+                                         przy_starcie=zapamietaj)
+    return wynik, blad
+
+
+def uruchom_claude_code(tresc, polecenie, katalog, limit_s, przy_starcie=None):
+    """
+    Uruchamia Claude Code i czeka na koniec — dla /kod i roadmapy.
+
+    przy_starcie(proces) — dostaje proces zaraz po starcie (żeby dało się go
+                           zatrzymać przy zamykaniu Jarvisa)
+
+    Zwraca (wynik z JSON albo None, opis błędu albo None, wyjście błędów).
+    Wyjście błędów jest osobno: roadmapa szuka w nim komunikatu o limitach.
+    """
     # Polecenie idzie przez wejście, nie jako argument — tekst zaczynający
     # się od "--" nie zostanie wzięty za opcję.
-    proces = subprocess.Popen(polecenie_claude(), cwd=KATALOG, stdin=subprocess.PIPE,
+    proces = subprocess.Popen(polecenie, cwd=katalog, stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               env=konfiguracja.srodowisko_bez_kluczy(), creationflags=BEZ_OKNA)
-    with _blokada:
-        if _zadanie is not None:
-            _zadanie["proces"] = proces
+    if przy_starcie is not None:
+        przy_starcie(proces)
     try:
-        wyjscie, bledy = proces.communicate(tresc.encode("utf-8"), timeout=LIMIT_ZADANIA_S)
+        wyjscie, bledy = proces.communicate(tresc.encode("utf-8"), timeout=limit_s)
     except subprocess.TimeoutExpired:
         _zabij_drzewo(proces.pid)
         proces.communicate()
-        return None, f"przekroczył limit {LIMIT_ZADANIA_S // 60} min, więc go zatrzymałem"
+        return None, f"przekroczył limit {limit_s // 60} min, więc go zatrzymałem", ""
 
+    bledy = bledy.decode("utf-8", "replace").strip()
     try:
-        return json.loads(wyjscie.decode("utf-8", "replace")), None
+        return json.loads(wyjscie.decode("utf-8", "replace")), None, bledy
     except ValueError:
-        linie = bledy.decode("utf-8", "replace").strip().splitlines()
-        return None, f"zakończył się kodem {proces.returncode}" + (f": {linie[-1]}" if linie else "")
+        linie = bledy.splitlines()
+        return (None, f"zakończył się kodem {proces.returncode}" + (f": {linie[-1]}" if linie else ""),
+                bledy)
+
+
+def wskazowka(tekst):
+    """
+    Podpowiedź do znanego błędu Claude Code albo "". Najczęstszy: wygasłe
+    logowanie ("OAuth session expired") — zalogować się może tylko człowiek.
+    """
+    if re.search(r"authenticat|oauth|not logged in|/login", tekst or "", re.I):
+        return ("🔑 Claude Code nie jest zalogowany. Na komputerze, w terminalu: claude, "
+                "a potem /login — i spróbuj jeszcze raz.")
+    return ""
 
 
 def _raport(wynik, blad, przed, po, czas, testy=None):
@@ -522,6 +597,10 @@ def _raport(wynik, blad, przed, po, czas, testy=None):
     else:
         czesci = [f"✅ Claude Code skończył ({_czas(czas)}).",
                   _skrot(str(wynik.get("result") or "(bez podsumowania)"), 3000)]
+    podpowiedz = wskazowka(f"{blad or ''} {(wynik or {}).get('result') or ''}") \
+        if blad or wynik.get("is_error") else ""
+    if podpowiedz:
+        czesci.append(podpowiedz)
 
     # Próby, które zatrzymały uprawnienia albo bramka — żebyś wiedział,
     # czego mu brakowało (np. chciał uruchomić testy).
@@ -609,12 +688,13 @@ def _drzewo(commit):
     return _git("rev-parse", f"{commit}^{{tree}}")
 
 
-def uruchom_testy(commit=None):
+def uruchom_testy(commit=None, katalog=None):
     """
     Testy Jarvisa (python -m pytest) na kodzie, który jest teraz w folderze.
 
-    commit — migawka tego kodu (zrzut); wynik zapamiętujemy razem z jej
-             drzewem, żeby /restart nie puszczał testów drugi raz bez potrzeby.
+    commit  — migawka tego kodu (zrzut); wynik zapamiętujemy razem z jej
+              drzewem, żeby /restart nie puszczał testów drugi raz bez potrzeby.
+    katalog — inny folder z kodem (kopia robocza roadmapy); domyślnie Jarvisa
 
     Zwraca słownik:
       "stan"     — "ok" (wszystkie przeszły), "blad" (któryś nie przeszedł albo
@@ -623,7 +703,8 @@ def uruchom_testy(commit=None):
       "opis"     — podsumowanie po polsku, np. "102 przeszło (1,9 s)"
       "nieudane" — identyfikatory testów, które nie przeszły
     """
-    if not os.path.isdir(os.path.join(KATALOG, "tests")):
+    katalog = katalog or KATALOG
+    if not os.path.isdir(os.path.join(katalog, "tests")):
         return _brak_testow("w projekcie nie ma folderu tests")
     srodowisko = konfiguracja.srodowisko_bez_kluczy()
     srodowisko["PYTHONIOENCODING"] = "utf-8"
@@ -632,7 +713,7 @@ def uruchom_testy(commit=None):
         # podsumowania ("102 passed in 1.87s"), z której bierzemy opis.
         proces = subprocess.Popen(
             [_python_konsolowy(), "-m", "pytest", "-rfE", "--color=no", "-p", "no:cacheprovider"],
-            cwd=KATALOG, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            cwd=katalog, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, env=srodowisko, creationflags=BEZ_OKNA)
     except OSError as e:
         return _brak_testow(f"nie udało się uruchomić Pythona ({e})")
@@ -708,11 +789,11 @@ def opis_testow(testy, maks=8):
 # /zatwierdz i /cofnij
 # ---------------------------------------------------------------
 
-def _sekret_w_plikach(sciezki_plikow):
+def _sekret_w_plikach(sciezki_plikow, katalog=None):
     """(plik, nazwa klucza) pierwszego klucza Jarvisa znalezionego w plikach albo None."""
     tajne = konfiguracja.tajne_wartosci()
     for sciezka in sciezki_plikow:
-        pelna = os.path.join(KATALOG, sciezka)
+        pelna = os.path.join(katalog or KATALOG, sciezka)
         try:
             if os.path.getsize(pelna) > 5_000_000:
                 continue

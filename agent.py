@@ -68,6 +68,7 @@ import konfiguracja
 import notes
 import pamiec
 import pliki
+import potwierdzenia
 import powitanie
 import przegladarka
 import reminders
@@ -161,6 +162,11 @@ NARZEDZIE_WYSZUKIWANIA = {
 
 KOMUNIKAT_WYSZUKIWANIA = "Dobra, sprawdzam, szefie."
 
+# Odpowiedź, gdy nie ma klucza Anthropic (opis w _odpowiedz).
+BRAK_KLUCZA_ANTHROPIC = ("Do rozmowy potrzebuję klucza Anthropic. Dodasz go w Ustawieniach, "
+                         "w zakładce Klucze API — kliknij napis Klucze API po prawej stronie "
+                         "ekranu albo ikonę Jarvisa przy zegarku.")
+
 # Zapowiedzi na czas działania narzędzi, które trwają zauważalnie długo.
 # Wyszukiwanie w sieci to kilkanaście sekund, otwieranie Spotify do 15 —
 # bez słowa z głośników wygląda to na zawieszenie.
@@ -242,6 +248,9 @@ użytkownik do ciebie, ale może też mówić do kogoś w pokoju.
 poza domem: polecenia dla komputera (muzyka, programy, przypomnienia) wykonujesz \
 normalnie, ale nie zakładaj, że widzi ekran. Odpowiedź pójdzie jako tekst \
 i głosówka.
+  [powitanie po starcie] — Jarvis został właśnie uruchomiony, a użytkownik \
+się przywitał ("hej, wróciłem", "cześć Jarvis", "jestem"). Zawsze wywołaj \
+powitanie_po_powrocie i przywitaj się tak, jak mówi jego wynik.
 
 Przy [bez "Hey Jarvis"] i [wszedł ci w słowo] odpowiadaj tylko wtedy, gdy \
 wypowiedź wyraźnie ciągnie rozmowę z tobą: odpowiada na twoje pytanie, prosi \
@@ -621,12 +630,13 @@ NARZEDZIA = [
         },
     },
     {
-        "name": "confirm_file_operation",
+        "name": "confirm_action",
         "description": (
-            "Wykonuje operację na plikach, która czeka na zgodę (POTRZEBNE POTWIERDZENIE "
-            "z kodem). Wołaj TYLKO w wypowiedzi, w której użytkownik odpowiedział na "
-            "Twoje pytanie — z jego 'tak' wykona, z 'nie' anuluje. Nigdy w tej samej "
-            "wypowiedzi, w której operacja powstała."
+            "Wykonuje operację, która czeka na zgodę (POTRZEBNE POTWIERDZENIE z kodem) — "
+            "zmianę pliku, przeniesienie plików, nowe wydarzenie w kalendarzu. Wołaj "
+            "TYLKO w wypowiedzi, w której użytkownik odpowiedział na Twoje pytanie — "
+            "z jego 'tak' wykona, z 'nie' anuluje. Nigdy w tej samej wypowiedzi, "
+            "w której operacja powstała."
         ),
         "input_schema": {
             "type": "object",
@@ -849,6 +859,30 @@ NARZEDZIA = [
                 "dzien": {"type": "string",
                           "description": "'dzisiaj', 'jutro', 'pojutrze', dzień tygodnia albo 'DD.MM'."},
             },
+        },
+    },
+    {
+        "name": "create_event",
+        "description": (
+            "Dodaje wydarzenie do kalendarza Google: 'dodaj rozmowę rekrutacyjną "
+            "w piątek o 10', 'wpisz mi dentystę 20.10 o 15:30 na pół godziny'. "
+            "Dzień podaj słowami jak w list_events ('jutro', 'piątek', 'DD.MM'), "
+            "godzinę jako 'HH:MM'; bez godziny powstaje wydarzenie na cały dzień. "
+            "NIGDY nie dodaje od razu: zwraca szczegóły i POTRZEBNE POTWIERDZENIE — "
+            "przeczytaj je użytkownikowi (co, dzień, godzina) i zapytaj. Usuwać "
+            "wydarzeń Jarvis nie może."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tytul": {"type": "string", "description": "Np. 'Rozmowa rekrutacyjna'."},
+                "dzien": {"type": "string",
+                          "description": "'dzisiaj', 'jutro', 'pojutrze', dzień tygodnia albo 'DD.MM'."},
+                "godzina": {"type": "string", "description": "'HH:MM'; pomiń dla całego dnia."},
+                "czas_trwania_min": {"type": "integer", "description": "Ile minut (domyślnie 60)."},
+                "miejsce": {"type": "string", "description": "Opcjonalnie, np. 'biuro na Długiej'."},
+            },
+            "required": ["tytul", "dzien"],
         },
     },
     {
@@ -1766,7 +1800,8 @@ _blokada_kosztu = threading.Lock()
 
 
 def odpowiedz(tekst_uzytkownika, historia=None, po_wake_wordzie=True, kanal="glos",
-              przerwanie=None, przerwana_reszta=None, wszedl_w_slowo=False):
+              przerwanie=None, przerwana_reszta=None, wszedl_w_slowo=False,
+              powitanie_startowe=False):
     """
     GŁÓWNE WEJŚCIE TEGO MODUŁU — to woła main.py (i most do Telegrama).
 
@@ -1778,7 +1813,8 @@ def odpowiedz(tekst_uzytkownika, historia=None, po_wake_wordzie=True, kanal="glo
     licznik = {"zapytan": 0, "koszt": 0.0}
     try:
         yield from _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik,
-                              przerwanie, przerwana_reszta, wszedl_w_slowo)
+                              przerwanie, przerwana_reszta, wszedl_w_slowo,
+                              powitanie_startowe)
     finally:
         if licznik["zapytan"]:
             with _blokada_kosztu:
@@ -1789,7 +1825,7 @@ def odpowiedz(tekst_uzytkownika, historia=None, po_wake_wordzie=True, kanal="glo
 
 
 def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, przerwanie=None,
-               przerwana_reszta=None, wszedl_w_slowo=False):
+               przerwana_reszta=None, wszedl_w_slowo=False, powitanie_startowe=False):
     """
     Właściwa pętla agenta (wywoływana przez odpowiedz()).
 
@@ -1810,6 +1846,11 @@ def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, prz
                         (słownik — opis przy _notatka_o_reszcie) albo None
     wszedl_w_slowo    — True, gdy ta wypowiedź przerwała Jarvisowi w trybie
                         słuchawek, bez "Hey Jarvis" (znacznik [wszedł ci w słowo])
+    powitanie_startowe — True, gdy to powitanie z okienka po starcie
+                        (powitanie_startowe.py, znacznik [powitanie po starcie]).
+                        Nie wymuszamy narzędzia przez tool_choice — przy myśleniu
+                        modelu wymuszanie jest niedozwolone — tylko instrukcja
+                        przy znaczniku każe wywołać powitanie_po_powrocie.
 
     To GENERATOR. Yielduje kolejne całe zdania do wypowiedzenia, a na samym
     końcu — jako OSTATNI element — słownik {"historia": [...]} z pełną,
@@ -1837,6 +1878,18 @@ def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, prz
         yield {"historia": historia}
         return
 
+    # Bez klucza Anthropic nie ma rozmowy — Jarvis startuje mimo to (żadnych
+    # okien z kluczami przy starcie), a tutaj mówi krótko, gdzie klucz dodać.
+    # Sprawdzane przy każdej wypowiedzi: po wpisaniu klucza w Ustawieniach
+    # rozmowa działa od razu, bez restartu. Gotowy klient (_klient) znaczy, że
+    # klucz był — main.py kasuje go po każdej zmianie Ustawień, więc usunięty
+    # klucz też tu trafi; testy podstawiają atrapę klienta (tests/atrapy.py).
+    if _klient is None and not konfiguracja.skonfigurowana("anthropic"):
+        logger.warning("[AGENT] Brak klucza Anthropic — rozmowa niemożliwa.")
+        yield BRAK_KLUCZA_ANTHROPIC
+        yield {"historia": historia}
+        return
+
     if _klient is None:
         _klient = _utworz_klienta()
 
@@ -1845,6 +1898,8 @@ def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, prz
     # w pokoju, bo nie miał jak odróżnić ich od pytań do siebie.
     if kanal == "telegram":
         znacznik = "[Telegram]"
+    elif powitanie_startowe:
+        znacznik = "[powitanie po starcie]"
     elif po_wake_wordzie:
         znacznik = '[po "Hey Jarvis"]'
     elif wszedl_w_slowo:
@@ -2099,9 +2154,15 @@ def _odpowiedz(tekst_uzytkownika, historia, po_wake_wordzie, kanal, licznik, prz
                 # Tu "komunikat" to lista bloków: obraz + tekst, a nie zwykły napis.
                 komunikat, sukces = _obraz_ekranu(wywolanie.input)
             elif wywolanie.name in pliki.NARZEDZIA_PLIKOW:
-                # Twoja wypowiedź i jej numer — do potwierdzeń (opis w pliki.py).
+                # Numer wypowiedzi — do potwierdzeń (opis w potwierdzenia.py).
                 komunikat, sukces = pliki.wykonaj(wywolanie.name, wywolanie.input,
                                                   tekst_uzytkownika, id_wypowiedzi)
+            elif wywolanie.name == "create_event":
+                komunikat, sukces = kalendarz.dodaj_wydarzenie(wywolanie.input, id_wypowiedzi)
+            elif wywolanie.name == "confirm_action":
+                # Zgoda tylko z Twojego "tak" w KOLEJNEJ wypowiedzi (potwierdzenia.py).
+                komunikat, sukces = potwierdzenia.potwierdz(wywolanie.input.get("kod"),
+                                                            tekst_uzytkownika, id_wypowiedzi)
             else:
                 komunikat, sukces = _wykonaj_narzedzie(wywolanie.name, wywolanie.input)
 

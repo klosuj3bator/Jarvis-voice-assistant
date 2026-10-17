@@ -350,7 +350,17 @@ def _wypowiedz(wpis, teraz):
     if spoznienie_min > PROG_SPOZNIENIA_MIN:
         tekst = (f"Spóźnione przypomnienie z godziny {kiedy.strftime('%H:%M')}. "
                  + tekst)
+    oglos(tekst)
 
+
+def oglos(tekst):
+    """
+    Ogłasza tekst jak przypomnienie: na Telegram od razu, na głos — gdy
+    Jarvis skończy mówić i słuchać. Woła to też kalendarz.py (przypomnienia
+    przed wydarzeniami, wygaśnięcie dostępu do Google).
+
+    Blokuje do końca mówienia — wołaj z wątku w tle.
+    """
     # Najpierw pozostałe kanały (Telegram). Awaria jednego z nich nie może
     # zatrzymać przypomnienia na głos.
     for odbiorca in list(_odbiorcy):
@@ -372,12 +382,14 @@ def _wypowiedz(wpis, teraz):
         logger.info("[PRZYPOMNIENIE] mówię: %s", tekst)
         # Na HUD bez treści — tapetę widzi każdy, kto przejdzie obok (akcje.py).
         akcje.zapisz("Przypomnienie")
-        _mow(tekst)
+        if _mow is not None:            # bez uruchom() (np. w testach) — tylko Telegram
+            _mow(tekst)
 
         if _ustaw_stan:
             # Wracamy do stanu sprzed przypomnienia. "error" pomijamy —
-            # to chwilowy błysk, który zdążył już zgasnąć.
-            _ustaw_stan(poprzedni_stan if poprzedni_stan in ("no_mic", "offline")
+            # to chwilowy błysk, który zdążył już zgasnąć. "powitanie" zostaje:
+            # okienko powitania po starcie dalej trwa (powitanie_startowe.py).
+            _ustaw_stan(poprzedni_stan if poprzedni_stan in ("no_mic", "offline", "powitanie")
                         else "idle")
 
 

@@ -13,6 +13,7 @@ import pytest
 import agent
 import email_monitor
 import pliki
+import potwierdzenia
 import sciezki
 from atrapy import KlientClaude, SkrzynkaGmail, przebieg, tura
 
@@ -26,7 +27,7 @@ def m(tmp_path, monkeypatch):
     monkeypatch.setenv(pliki.ZMIENNA_MIEJSC, f"{pulpit};{dokumenty}")
     otwarte = []
     monkeypatch.setattr(pliki, "_otworz", otwarte.append)
-    monkeypatch.setattr(pliki, "_oczekujaca", None)
+    monkeypatch.setattr(potwierdzenia, "_oczekujaca", None)
     return NS(pulpit=pulpit, dokumenty=dokumenty, otwarte=otwarte, tmp=tmp_path)
 
 
@@ -34,9 +35,11 @@ _numer = [100]
 
 
 def w(nazwa, wypowiedz="", nowa_wypowiedz=True, **parametry):
-    """Narzędzie plików tak, jak woła je agent: każde wywołanie to nowa wypowiedź."""
+    """Narzędzie tak, jak woła je agent: każde wywołanie to nowa wypowiedź."""
     if nowa_wypowiedz:
         _numer[0] += 1
+    if nazwa == "confirm_action":
+        return potwierdzenia.potwierdz(parametry.get("kod"), wypowiedz, _numer[0])
     return pliki.wykonaj(nazwa, parametry, wypowiedz, _numer[0])
 
 
@@ -180,11 +183,11 @@ def test_istniejacy_plik_nadpisany_dopiero_po_tak_w_kolejnej_wypowiedzi(m):
     assert czytaj(sciezka) == "stara lista\n"
     k = kod(komunikat)
     # Ta sama wypowiedź — model nie może potwierdzić sam sobie.
-    assert w("confirm_file_operation", "tak", nowa_wypowiedz=False, kod=k)[0].startswith("NIE WYKONANO")
+    assert w("confirm_action", "tak", nowa_wypowiedz=False, kod=k)[0].startswith("NIE WYKONANO")
     # Kolejna wypowiedź, ale bez zgody.
-    assert w("confirm_file_operation", "a jaka jutro pogoda?", kod=k)[0].startswith("NIE WYKONANO")
+    assert w("confirm_action", "a jaka jutro pogoda?", kod=k)[0].startswith("NIE WYKONANO")
     assert czytaj(sciezka) == "stara lista\n"
-    assert w("confirm_file_operation", "tak, nadpisz", kod=k) == ("Nadpisałem plik Pulpit/zakupy.md.", True)
+    assert w("confirm_action", "tak, nadpisz", kod=k) == ("Nadpisałem plik Pulpit/zakupy.md.", True)
     assert czytaj(sciezka) == "nowa lista\n"
 
 
@@ -192,8 +195,8 @@ def test_nie_anuluje_operacje(m):
     sciezka = str(m.pulpit / "a.txt")
     zapisz(sciezka, "zostaje\n")
     k = kod(w("create_file", sciezka="Pulpit/a.txt", tresc="nowe")[0])
-    assert "anulowałem" in w("confirm_file_operation", "nie, zostaw", kod=k)[0]
-    assert not w("confirm_file_operation", "tak", kod=k)[1]
+    assert "anulowałem" in w("confirm_action", "nie, zostaw", kod=k)[0]
+    assert not w("confirm_action", "tak", kod=k)[1]
     assert czytaj(sciezka) == "zostaje\n"
 
 
@@ -201,12 +204,12 @@ def test_zly_kod_wygasniecie_i_nowa_propozycja(m, monkeypatch):
     zapisz(str(m.pulpit / "a.txt"), "a\n")
     zapisz(str(m.pulpit / "b.txt"), "b\n")
     k_a = kod(w("create_file", sciezka="Pulpit/a.txt", tresc="x")[0])
-    assert not w("confirm_file_operation", "tak", kod="zly")[1]
+    assert not w("confirm_action", "tak", kod="zly")[1]
     k_b = kod(w("create_file", sciezka="Pulpit/b.txt", tresc="y")[0])       # zastępuje poprzednią
-    assert not w("confirm_file_operation", "tak", kod=k_a)[1]
-    monkeypatch.setattr(pliki, "WAZNOSC_S", 0)
+    assert not w("confirm_action", "tak", kod=k_a)[1]
+    monkeypatch.setattr(potwierdzenia, "WAZNOSC_S", 0)
     time.sleep(0.01)
-    assert w("confirm_file_operation", "tak", kod=k_b)[0].startswith("Propozycja wygasła")
+    assert w("confirm_action", "tak", kod=k_b)[0].startswith("Propozycja wygasła")
     assert czytaj(str(m.pulpit / "a.txt")) == "a\n" and czytaj(str(m.pulpit / "b.txt")) == "b\n"
 
 
@@ -238,7 +241,7 @@ def test_zmiana_najpierw_podglad_potem_zapis_po_zgodzie(m):
     komunikat, ok = w("edit_file", sciezka="Pulpit/zakupy.md", stary_tekst="mleko", nowy_tekst="sok")
     assert "było: - Mleko\n  będzie: - sok" in komunikat and "było: - mleko kokosowe" in komunikat
     assert czytaj(sciezka) == "- Mleko\n- chleb\n- mleko kokosowe\n"          # nic jeszcze nie zmienione
-    assert w("confirm_file_operation", "tak", kod=kod(komunikat))[0].startswith("Zapisałem zmiany")
+    assert w("confirm_action", "tak", kod=kod(komunikat))[0].startswith("Zapisałem zmiany")
     assert czytaj(sciezka) == "- sok\n- chleb\n- sok kokosowe\n"
 
 
@@ -253,7 +256,7 @@ def test_plik_zmieniony_po_podgladzie_nie_jest_nadpisany(m):
     zapisz(sciezka, "- mleko\n")
     k = kod(w("edit_file", sciezka="Pulpit/zakupy.md", stary_tekst="mleko", nowy_tekst="sok")[0])
     zapisz(sciezka, "- mleko\n- dopisane w Notatniku\n")
-    assert w("confirm_file_operation", "tak", kod=k)[0].startswith("Plik zmienił się od podglądu")
+    assert w("confirm_action", "tak", kod=k)[0].startswith("Plik zmienił się od podglądu")
     assert czytaj(sciezka) == "- mleko\n- dopisane w Notatniku\n"
 
 
@@ -288,7 +291,7 @@ def test_wiecej_niz_kilka_najpierw_lista_i_zgoda(m):
     komunikat, ok = w("move_files", pliki=["Pulpit/*.pdf"], cel="Pulpit/Faktury")
     assert "Chcesz przenieść 7 plików do Pulpit/Faktury" in komunikat and "  - faktura6.pdf" in komunikat
     assert not (m.pulpit / "Faktury").exists() and len(os.listdir(m.pulpit)) == 7
-    assert w("confirm_file_operation", "dawaj", kod=kod(komunikat))[0] == "Przeniosłem 7 plików do Pulpit/Faktury."
+    assert w("confirm_action", "dawaj", kod=kod(komunikat))[0] == "Przeniosłem 7 plików do Pulpit/Faktury."
     assert len(os.listdir(m.pulpit / "Faktury")) == 7
 
 
@@ -304,7 +307,7 @@ def test_plik_o_tej_samej_nazwie_w_celu_nadpisany_tylko_po_zgodzie(m):
     komunikat, _ = w("move_files", pliki=["Pulpit/umowa.pdf"], cel="Pulpit/Faktury")
     assert "NADPISZE: umowa.pdf" in komunikat
     assert czytaj(str(m.pulpit / "Faktury" / "umowa.pdf")) == "stara umowa"
-    w("confirm_file_operation", "tak", kod=kod(komunikat))
+    w("confirm_action", "tak", kod=kod(komunikat))
     assert czytaj(str(m.pulpit / "Faktury" / "umowa.pdf")) == "nowa umowa"
     assert not (m.pulpit / "umowa.pdf").exists()
 
@@ -335,17 +338,17 @@ def test_nie_przenosi_spoza_dozwolonych_miejsc(m):
 def test_agent_zmienia_plik_dopiero_w_kolejnej_wypowiedzi(m, monkeypatch):
     sciezka = str(m.pulpit / "zakupy.md")
     zapisz(sciezka, "- mleko\n")
-    monkeypatch.setattr(pliki.uuid, "uuid4", lambda: NS(hex="abc123ffff"))
+    monkeypatch.setattr(potwierdzenia.uuid, "uuid4", lambda: NS(hex="abc123ffff"))
     agent._klient = KlientClaude(
         tura(narzedzia=[("e1", "edit_file", {"sciezka": "Pulpit/zakupy.md", "stary_tekst": "mleko",
                                               "nowy_tekst": "sok"})]),
         # Model "się spieszy" i potwierdza od razu, w tej samej wypowiedzi.
-        tura(narzedzia=[("c1", "confirm_file_operation", {"kod": "abc123"})]),
+        tura(narzedzia=[("c1", "confirm_action", {"kod": "abc123"})]),
         tura("Zamienię mleko na sok. Potwierdzasz?"),
     )
     _, stan = przebieg(agent.odpowiedz("w liście zakupów zamień mleko na sok", []))
     assert czytaj(sciezka) == "- mleko\n"                       # samopotwierdzenie odrzucone
-    agent._klient = KlientClaude(tura(narzedzia=[("c2", "confirm_file_operation", {"kod": "abc123"})]),
+    agent._klient = KlientClaude(tura(narzedzia=[("c2", "confirm_action", {"kod": "abc123"})]),
                                  tura("Gotowe."))
     przebieg(agent.odpowiedz("tak", stan["historia"]))
     assert czytaj(sciezka) == "- sok\n"

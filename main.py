@@ -70,6 +70,7 @@ import gui
 import konfiguracja
 import panel
 import pasek_boczny
+import powitanie_startowe
 import rozruch
 import tapeta
 import zajetosc
@@ -404,7 +405,8 @@ class _BudzikCtrlC:
 _przerwana_reszta = None
 
 
-def _odpowiedz(orb, tekst, historia_rozmowy, po_wake_wordzie=True, wszedl_w_slowo=False):
+def _odpowiedz(orb, tekst, historia_rozmowy, po_wake_wordzie=True, wszedl_w_slowo=False,
+               powitanie=False):
     """
     Jedna wymiana zdań: agent myśli, Jarvis odpowiada, a na koniec
     wykonuje odłożone polecenie systemowe (blokada, restart...).
@@ -414,6 +416,8 @@ def _odpowiedz(orb, tekst, historia_rozmowy, po_wake_wordzie=True, wszedl_w_slow
 
     wszedl_w_slowo — ta wypowiedź przerwała poprzednią odpowiedź w trybie
                      słuchawek, bez "Hey Jarvis" (znacznik dla modelu)
+    powitanie      — powitanie z okienka po starcie (znacznik dla modelu,
+                     opis w powitanie_startowe.py)
 
     Zwraca: (nowa historia, stan od agenta, czy kończyć rozmowę). Po przerwaniu
     stan ma "przerwane": True i:
@@ -452,7 +456,7 @@ def _odpowiedz(orb, tekst, historia_rozmowy, po_wake_wordzie=True, wszedl_w_slow
     # (Spotify, aplikacje, wyszukiwarka, pamięć), czy po prostu odpowiedzieć.
     generator = agent.odpowiedz(tekst, historia_rozmowy, po_wake_wordzie,
                                 przerwanie=przerwanie, przerwana_reszta=_przerwana_reszta,
-                                wszedl_w_slowo=wszedl_w_slowo)
+                                wszedl_w_slowo=wszedl_w_slowo, powitanie_startowe=powitanie)
 
     # Agent oddaje zdania do wypowiedzenia, a na samym końcu — słownik
     # ze stanem rozmowy. Przechwytujemy go tutaj, zanim trafi
@@ -548,7 +552,7 @@ def _odpowiedz(orb, tekst, historia_rozmowy, po_wake_wordzie=True, wszedl_w_slow
     return historia_rozmowy, stan, koniec_po_systemie
 
 
-def rozmowa(orb, pierwszy_tekst):
+def rozmowa(orb, pierwszy_tekst, powitanie=False):
     """
     PĘTLA WEWNĘTRZNA — obsługuje jedną sesję rozmowy.
 
@@ -583,6 +587,11 @@ def rozmowa(orb, pierwszy_tekst):
     Przerwanie NIE kończy rozmowy. Po wejściu w słowo Jarvis słucha dalej
     bez "Hey Jarvis" — także gdy po przerwaniu zamilkłeś, i także gdy
     w trybie słuchawek przerwał mu ktoś, kto mówił do kogoś innego.
+
+    powitanie=True — powitanie z okienka po starcie (powitanie_startowe.py):
+    Jarvis wita i od razu wraca do czuwania na "Hey Jarvis", bez słuchania
+    dalej. Jeśli w trakcie powitania wejdziesz mu w słowo — to już zwykła
+    rozmowa.
     """
     historia_rozmowy = pamiec.poprzednia_rozmowa()
     if historia_rozmowy:
@@ -637,10 +646,11 @@ def rozmowa(orb, pierwszy_tekst):
         # odezwać się, zanim padnie odpowiedź na Twoje pytanie.
         with zajetosc.zajmij("odpowiedź"):
             historia_rozmowy, stan, koniec_po_systemie = _odpowiedz(
-                orb, tekst, historia_rozmowy, po_wake_wordzie, wszedl_w_slowo)
+                orb, tekst, historia_rozmowy, po_wake_wordzie, wszedl_w_slowo, powitanie)
         przerwal_mi = wszedl_w_slowo
         po_wake_wordzie = False
         wszedl_w_slowo = False
+        po_powitaniu, powitanie = powitanie, False
 
         # Wszedłeś Jarvisowi w słowo — nowe polecenie jest już nagrane
         # i rozpoznane ("": sam hałas, słuchamy dalej — tak samo jak niżej).
@@ -662,6 +672,11 @@ def rozmowa(orb, pierwszy_tekst):
         if koniec_po_systemie:
             # Rozmowa kończy się tu, a zapis do pamięci robi wspólny
             # kawałek kodu pod pętlą — nie duplikujemy go.
+            break
+
+        # Powitanie po starcie wybrzmiało — od razu zwykły tryb z "Hey Jarvis".
+        if po_powitaniu:
+            logger.info("Powitanie po starcie gotowe — wracam do czuwania na 'Hey Jarvis'.")
             break
 
         # Pożegnanie już wybrzmiało (mow_strumieniowo blokuje), więc dopiero
@@ -701,6 +716,37 @@ def rozmowa(orb, pierwszy_tekst):
         pamiec.zapisz_rozmowe(historia_rozmowy)
     except Exception:
         logger.exception("Nie udało się zapisać rozmowy do pamięci")
+
+
+def _okno_powitania(orb):
+    """
+    Okienko powitania po starcie — opis w powitanie_startowe.py.
+
+    Nasłuch jest "cichy": tekst cudzych rozmów nie trafia do dziennika ani na
+    panel boczny. Do dziennika i panelu trafia dopiero to, co było do Jarvisa
+    (powitanie albo polecenie z "Jarvis" na początku) — przez rozmowa().
+    """
+    if not konfiguracja.powitanie_po_starcie():
+        logger.info("Powitanie po starcie wyłączone w Ustawieniach.")
+        return
+
+    def sluchaj(limit_s):
+        # HUD: "czekam na powitanie" — po każdej wypowiedzi wracamy do tego
+        # stanu, bo nasłuch przełącza go na "słucham" i "myślę".
+        orb.set_state("powitanie")
+        return wake_word_listener.sluchaj_bez_wake_worda(orb.set_state, limit_ciszy_s=limit_s,
+                                                         cicho=True)
+
+    try:
+        powitanie_startowe.czekaj_na_powitanie(
+            sluchaj=sluchaj,
+            przywitaj=lambda tekst: rozmowa(orb, tekst, powitanie=True),
+            polecenie=lambda tekst: rozmowa(orb, tekst),
+            czy_zatrzymano=wake_word_listener.czy_zatrzymano,
+            minuty=konfiguracja.okno_powitania_min(),
+        )
+    finally:
+        orb.set_state("idle")
 
 
 def petla_jarvisa(orb):
@@ -757,6 +803,22 @@ def petla_jarvisa(orb):
         )
         if most is not None:
             reminders.dodaj_odbiorce(most.powiadom)
+            # Tryb roadmapy (roadmapa.py): propozycje zadań z MapaZadan.md, raport
+            # dzienny, limity Claude Code — wszystko przez Telegram. Wątek działa
+            # zawsze, a czy coś proponuje, decyduje przełącznik w Ustawieniach.
+            # Restart dostaje tylko /scal — sama roadmapa Jarvisa nie restartuje.
+            import roadmapa
+
+            roadmapa.uruchom(kanal=most, restart=most.zrestartuj)
+
+        # Kalendarz: przypomnienia przed wydarzeniami i wiadomość, gdy Google
+        # odbierze dostęp — jedno i drugie na głos i na Telegram (reminders.oglos).
+        # Moduł jest już wczytany — importuje go agent.
+        import kalendarz
+
+        kalendarz.przy_wygasnieciu(lambda tekst: threading.Thread(
+            target=reminders.oglos, args=(tekst,), name="kalendarz-wygasl", daemon=True).start())
+        kalendarz.uruchom_przypomnienia(reminders.oglos)
 
         # Czujki na maile wysyłają powiadomienia na Telegram — bez niego nie
         # miałyby dokąd, więc nawet nie zaglądają do skrzynki.
@@ -777,6 +839,10 @@ def petla_jarvisa(orb):
         import indeks_notatek
 
         indeks_notatek.uruchom_w_tle()
+
+        # Przez kilka minut po starcie wystarczy "hej, wróciłem" — bez
+        # "Hey Jarvis" (opis w powitanie_startowe.py; Ustawienia → Nasłuch).
+        _okno_powitania(orb)
 
         while not wake_word_listener.czy_zatrzymano():
             logger.info("=== TRYB: CZUWANIE (czekam na 'Hey Jarvis') ===")
@@ -895,20 +961,18 @@ def main():
     zdalny_kod.zapamietaj_start()
 
     # KLUCZE: z Ustawień (%APPDATA%\Jarvis), a czego tam nie ma — z .env
-    # (opis w konfiguracja.py). Bez klucza Anthropic Jarvis nie ma mózgu,
-    # więc zanim cokolwiek wystartuje, prowadzi Cię przez kreator.
+    # (opis w konfiguracja.py). Start NIGDY nie otwiera kreatora ani okien
+    # z kluczami: brakujące pokazuje linijka "Klucze API: brak N" po prawej
+    # stronie HUD-a (kliknięcie otwiera Ustawienia), a bez klucza Anthropic
+    # Jarvis mówi, gdzie go dodać, gdy się do niego odezwiesz (agent.py).
     konfiguracja.wczytaj()
-    if not konfiguracja.skonfigurowana("anthropic"):
-        logger.info("Brak klucza Anthropic — uruchamiam kreator pierwszego uruchomienia.")
-        import setup_wizard
+    brakujace = konfiguracja.brakujace_klucze()
+    if brakujace:
+        logger.info("Brakujące klucze: %s.", ", ".join(brakujace))
 
-        if not setup_wizard.uruchom_kreator(pierwsze=True):
-            logger.error("Kreator zamknięty bez klucza Anthropic — Jarvis nie wystartuje.")
-            return 1
-
-    # MODELE MOWY (tylko wersja z instalatora): kreator pobiera je przy
-    # pierwszym uruchomieniu. Gdy klucze są, a modeli nie ma (np. ktoś
-    # skasował folder), pokazujemy samo okno pobierania.
+    # MODELE MOWY (tylko wersja z instalatora): bez nich Jarvis nie usłyszy
+    # "Hey Jarvis", więc gdy ich brakuje, pokazujemy okno pobierania (to nie
+    # jest okno z kluczami — tylko pasek postępu).
     import modele
 
     if modele.potrzebne_pobranie():
@@ -981,7 +1045,11 @@ def main():
             return
 
         reminders.zatrzymaj()
+        if "kalendarz" in sys.modules:          # wczytuje go agent; przypomnienia o wydarzeniach
+            sys.modules["kalendarz"].zatrzymaj()
         email_monitor.zatrzymaj()
+        if "roadmapa" in sys.modules:           # zatrzymuje też Claude Code w toku
+            sys.modules["roadmapa"].zatrzymaj()
         telegram_bridge.zatrzymaj()
         wake_word_listener.zatrzymaj()
 
@@ -1000,10 +1068,20 @@ def main():
     # i czujki poczty startują przy uruchomieniu, więc proponujemy restart.
     ponowne_uruchomienie = threading.Event()
 
-    def ustawienia():
+    def odswiez_klucze():
+        """Linijka "Klucze API: brak N" na HUD-zie i w menu przy zegarku."""
+        brakujace = konfiguracja.brakujace_klucze()
+        orb.ustaw_klucze(len(brakujace), "anthropic" in brakujace)
+        tray.ustaw_klucze(len(brakujace), "anthropic" in brakujace)
+
+    def ustawienia(strona=None):
+        """strona="klucze" — od razu zakładka Klucze API (kliknięcie linijki na HUD-zie)."""
         import setup_wizard
 
-        zmiany = setup_wizard.uruchom_kreator(pierwsze=False)
+        # Menu przy zegarku podaje tu "checked" (bool) — wtedy zwykłe Ustawienia.
+        zmiany = setup_wizard.uruchom_kreator(pierwsze=False,
+                                              strona=strona if isinstance(strona, str) else None)
+        odswiez_klucze()                # np. połączony kalendarz albo nowy klucz
         if not zmiany:
             return
         # Nowy monitor tapety i ustawienia panelu działają od razu, bez restartu.
@@ -1041,7 +1119,14 @@ def main():
     tray = gui.TrayJarvisa(app, orb, przy_zamknieciu=posprzataj, przy_ustawieniach=ustawienia,
                            czy_tryb_sluchawek=konfiguracja.tryb_sluchawek,
                            ustaw_tryb_sluchawek=konfiguracja.ustaw_tryb_sluchawek,
-                           ustaw_tryb_tapety=tryb_tapety, panel_boczny=sterownik_panelu)
+                           ustaw_tryb_tapety=tryb_tapety, panel_boczny=sterownik_panelu,
+                           przy_kluczach=lambda: ustawienia("klucze"))
+
+    # Brakujące klucze: linijka po prawej stronie HUD-a (kliknięcie = Ustawienia
+    # na zakładce Klucze API) i pozycja w menu przy zegarku — ta działa także
+    # w trybie tapety, gdzie HUD nie przyjmuje kliknięć.
+    orb.przy_kluczach = lambda: ustawienia("klucze")
+    odswiez_klucze()
 
     # Ctrl+C w aplikacji Qt: pętla zdarzeń Qt siedzi w kodzie C++ i nie oddaje
     # sterowania Pythonowi, więc domyślnie nie zauważyłby wciśnięcia Ctrl+C.
